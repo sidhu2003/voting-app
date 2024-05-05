@@ -11,10 +11,10 @@ This solution uses Python, Node.js, .NET, with Redis for messaging and Postgres 
 Run in this directory to build and run the app:
 
 ```shell
-docker compose up
+docker compose up -d
 ```
 
-The `vote` app will be running at [http://localhost:5000](http://localhost:5000), and the `results` will be at [http://localhost:5001](http://localhost:5001).
+The `vote` app will be running at [http://localhost:8000](http://localhost:8000), and the `results` will be at [http://localhost:4000](http://localhost:4000).
 
 ## Architecture
 
