@@ -35,6 +35,8 @@ def hello():
         app.logger.info('Received vote for %s', vote)
         data = json.dumps({'voter_id': voter_id, 'vote': vote})
         redis.rpush('votes', data)
+        if redis.rpush('votes', data):
+            app.logger.info('Vote stored in Redis')
 
     resp = make_response(render_template(
         'index.html',
