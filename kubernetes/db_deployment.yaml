@@ -1,7 +1,7 @@
 apiVersion: apps/v1 
 kind: Deployment
 metadata:
-  name: database_deployment
+  name: database-deployment
 spec:
   replicas: 1
   selector:
