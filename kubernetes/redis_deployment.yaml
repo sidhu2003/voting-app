@@ -1,0 +1,26 @@
+apiVersion: apps/v1 
+kind: Deployment
+metadata:
+  name: redis_deployment
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: voting-app
+      type: cache-db
+  template:
+    metadata:
+      name: redis-pod
+      labels:
+        app: voting-app
+        type: cache-db
+    spec:
+      containers:
+      - name: redis
+        image: redis:latest
+        resources:
+          limits:
+            memory: "128Mi"
+            cpu: "500m"
+        ports:
+        - containerPort: 6379

@@ -1,0 +1,26 @@
+apiVersion: apps/v1 
+kind: Deployment
+metadata:
+  name: result_deployment
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: voting-app
+      type: result-app
+  template:
+    metadata:
+      name: result-pod
+      labels:
+        app: voting-app
+        type: result-app
+    spec:
+      containers:
+      - name: result
+        image: programmer175/voteapp_result:latest
+        resources:
+          limits:
+            memory: "128Mi"
+            cpu: "500m"
+        ports:
+        - containerPort: 4000

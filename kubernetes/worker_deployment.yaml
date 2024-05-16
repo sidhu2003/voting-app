@@ -1,0 +1,24 @@
+apiVersion: apps/v1 
+kind: Deployment
+metadata:
+  name: worker_deployment
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: voting-app
+      type: worker-app
+  template:
+    metadata:
+      name: worker-pod
+      labels:
+        app: voting-app
+        type: worker-app
+    spec:
+      containers:
+      - name: worker
+        image: programmer175/voteapp_worker:latest
+        resources:
+          limits:
+            memory: "128Mi"
+            cpu: "500m"

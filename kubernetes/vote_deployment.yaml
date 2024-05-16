@@ -1,0 +1,26 @@
+apiVersion: apps/v1 
+kind: Deployment
+metadata:
+  name: vote_deployment
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: voting-app
+      type: vote-app
+  template:
+    metadata:
+      name: vote-pod
+      labels:
+        app: voting-app
+        type: vote-app
+    spec:
+      containers:
+      - name: vote
+        image: programmer175/voteapp_vote:latest
+        resources:
+          limits:
+            memory: "128Mi"
+            cpu: "500m"
+        ports:
+        - containerPort: 8000
