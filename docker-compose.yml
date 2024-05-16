@@ -8,8 +8,6 @@ services:
       dockerfile: Dockerfile
     ports:
       - "8000:8000"
-    volumes:
-      - .:/code
     depends_on:
       - redis
 
@@ -17,8 +15,6 @@ services:
     build: 
       context: ./worker
       dockerfile: Dockerfile
-    volumes:
-      - .:/code
     depends_on:
       - redis
       - db
@@ -29,8 +25,6 @@ services:
       dockerfile: Dockerfile
     ports:
       - "4000:4000"
-    volumes:
-      - .:/code
     depends_on:
       - db
 
