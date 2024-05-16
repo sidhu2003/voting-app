@@ -10,7 +10,7 @@ env:
 
 jobs:
 
-  BUILD_AND_PUBLISH:   
+  BUILD_AND_PUBLISH_VOTE:   
     runs-on: ubuntu-latest
     steps:
       - name: Code checkout
