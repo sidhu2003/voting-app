@@ -5,11 +5,10 @@ on:
       - main
 env:
   AWS_REGION: us-east-1
-  EKS_CLUSTER: votingapp-eks
 
 jobs:
 
-  BUILD_AND_PUBLISH_RESULT:   
+  BUILD_AND_PUBLISH_RESULT:
     runs-on: ubuntu-latest
     steps:
       - name: Code checkout
@@ -18,16 +17,16 @@ jobs:
       - name: Build & Upload image to ECR
         uses: appleboy/docker-ecr-action@master
         with:
-         access_key: ${{ secrets.AWS_ACCESS_KEY_ID }}
-         secret_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-         registry: result
-         repo: ${{ env.ECR_REPOSITORY }}
-         region: ${{ env.AWS_REGION }}
-         tags: latest,${{ github.run_number }}
-         daemon_off: false
-         dockerfile: ./result/Dockerfile
-         context: ./result
-         
+          access_key: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          secret_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          registry: ${{ secrets.REGISTRY }}
+          repo: result
+          region: ${{ env.AWS_REGION }}
+          tags: latest,${{ github.run_number }}
+          daemon_off: false
+          dockerfile: ./result/Dockerfile
+          context: ./result
+
   BUILD_AND_PUBLISH_VOTE:
     runs-on: ubuntu-latest
     steps:
@@ -37,16 +36,15 @@ jobs:
       - name: Build & Upload image to ECR
         uses: appleboy/docker-ecr-action@master
         with:
-         access_key: ${{ secrets.AWS_ACCESS_KEY_ID }}
-         secret_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-         registry: vote
-         repo: ${{ env.ECR_REPOSITORY }}
-         region: ${{ env.AWS_REGION }}
-         tags: latest,${{ github.run_number }}
-         daemon_off: false
-         dockerfile: ./vote/Dockerfile
-         context: ./vote
-
+          access_key: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          secret_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          registry: ${{ secrets.REGISTRY }}
+          repo: vote
+          region: ${{ env.AWS_REGION }}
+          tags: latest,${{ github.run_number }}
+          daemon_off: false
+          dockerfile: ./vote/Dockerfile
+          context: ./vote
 
   BUILD_AND_PUBLISH_WORKER:
     runs-on: ubuntu-latest
@@ -57,14 +55,12 @@ jobs:
       - name: Build & Upload image to ECR
         uses: appleboy/docker-ecr-action@master
         with:
-         access_key: ${{ secrets.AWS_ACCESS_KEY_ID }}
-         secret_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-         registry: worker
-         repo: ${{ env.ECR_REPOSITORY }}
-         region: ${{ env.AWS_REGION }}
-         tags: latest,${{ github.run_number }}
-         daemon_off: false
-         dockerfile: ./worker/Dockerfile
-         context: ./worker
-
-   
+          access_key: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          secret_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          registry: ${{ secrets.REGISTRY }}
+          repo: worker
+          region: ${{ env.AWS_REGION }}
+          tags: latest,${{ github.run_number }}
+          daemon_off: false
+          dockerfile: ./worker/Dockerfile
+          context: ./worker
