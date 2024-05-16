@@ -65,15 +65,10 @@ jobs:
           dockerfile: ./worker/Dockerfile
           context: ./worker
 
-  Deploy_to_Kubernetes:
-    runs-on: ubuntu-latest     
-    steps:   
-
-      - name: Get Kube config file
-        run: aws eks update-kubeconfig --region ap-south-1 --name pc-eks
-
-      - name: Login to ECR
-        run: kubectl create secret docker-registry regcred --docker-server=${{ secrets.REGISTRY }} --docker-username=AWS  --docker-password=$(aws ecr get-login-password) 
-
-      - name: Deploy to Kubernetes
-        run: kubectl apply -f kubernetes/
+      - name: Deployment
+        uses: Pablommr/kubernetes-eks@v1.2.0
+        env:
+             AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+             AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+             KUBECONFIG: ${{ secrets.KUBECONFIG }}
+             KUBE_YAML: ./kubernetes
