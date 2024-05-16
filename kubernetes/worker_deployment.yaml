@@ -17,4 +17,4 @@ spec:
     spec:
       containers:
       - name: worker
-        image: programmer175/voteapp_worker:latest
+        image: 817780818534.dkr.ecr.us-east-1.amazonaws.com/worker:latest

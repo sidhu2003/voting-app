@@ -64,3 +64,16 @@ jobs:
           daemon_off: false
           dockerfile: ./worker/Dockerfile
           context: ./worker
+
+  Deploy_to_Kubernetes:
+    runs-on: ubuntu-latest     
+    steps:   
+
+      - name: Get Kube config file
+        run: aws eks update-kubeconfig --region ap-south-1 --name pc-eks
+
+      - name: Login to ECR
+        run: kubectl create secret docker-registry regcred --docker-server=${{ secrets.REGISTRY }} --docker-username=AWS  --docker-password=$(aws ecr get-login-password) 
+
+      - name: Deploy to Kubernetes
+        run: kubectl apply -f kubernetes/

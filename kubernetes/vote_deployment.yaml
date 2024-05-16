@@ -17,6 +17,6 @@ spec:
     spec:
       containers:
       - name: vote
-        image: programmer175/voteapp_vote:latest
+        image: 817780818534.dkr.ecr.us-east-1.amazonaws.com/vote:latest
         ports:
         - containerPort: 8000
