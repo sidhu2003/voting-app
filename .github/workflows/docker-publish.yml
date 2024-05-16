@@ -3,8 +3,6 @@ on:
   push:
     branches:
       - main
-env:
-  AWS_REGION: us-east-1
 
 jobs:
 
@@ -21,7 +19,7 @@ jobs:
           secret_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           registry: ${{ secrets.REGISTRY }}
           repo: result
-          region: ${{ env.AWS_REGION }}
+          region: us-east-1
           tags: latest,${{ github.run_number }}
           daemon_off: false
           dockerfile: ./result/Dockerfile
@@ -40,7 +38,7 @@ jobs:
           secret_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           registry: ${{ secrets.REGISTRY }}
           repo: vote
-          region: ${{ env.AWS_REGION }}
+          region: us-east-1
           tags: latest,${{ github.run_number }}
           daemon_off: false
           dockerfile: ./vote/Dockerfile
@@ -59,7 +57,7 @@ jobs:
           secret_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           registry: ${{ secrets.REGISTRY }}
           repo: worker
-          region: ${{ env.AWS_REGION }}
+          region: us-east-1
           tags: latest,${{ github.run_number }}
           daemon_off: false
           dockerfile: ./worker/Dockerfile
@@ -72,3 +70,4 @@ jobs:
              AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
              KUBECONFIG: ${{ secrets.KUBECONFIG }}
              KUBE_YAML: ./kubernetes
+             AWS_REGION: ap-south-1
