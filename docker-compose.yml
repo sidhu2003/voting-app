@@ -3,26 +3,23 @@ version: '3.8'
 services:
 
   vote:
-    build: 
-      context: ./vote
-      dockerfile: Dockerfile
+    container_name: vote
+    image: programmer175/voteapp_vote:latest
     ports:
       - "8000:8000"
     depends_on:
       - redis
 
   worker:
-    build: 
-      context: ./worker
-      dockerfile: Dockerfile
+    container_name: worker
+    image: programmer175/voteapp_worker:latest
     depends_on:
       - redis
       - db
 
   result:
-    build: 
-      context: ./result
-      dockerfile: Dockerfile
+    container_name: result
+    image: programmer175/voteapp_result:latest
     ports:
       - "4000:4000"
     depends_on:
