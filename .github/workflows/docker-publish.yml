@@ -71,3 +71,4 @@ jobs:
              KUBECONFIG: ${{ secrets.KUBECONFIG }}
              KUBE_YAML: ./kubernetes
              AWS_REGION: ap-south-1
+             AWS_PROFILE: siddu
