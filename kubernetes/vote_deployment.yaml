@@ -18,9 +18,5 @@ spec:
       containers:
       - name: vote
         image: programmer175/voteapp_vote:latest
-        resources:
-          limits:
-            memory: "128Mi"
-            cpu: "500m"
         ports:
         - containerPort: 8000
