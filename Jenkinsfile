@@ -14,11 +14,11 @@ pipeline {
         stage('Build Vote Image') {
             steps {
                 script {
-                    // Navigate to the directory containing the Dockerfile
+                    
                     dir('vote') {
-                        // Build the Docker image and assign it to a variable
+                        
                         def voteImage = docker.build("${registryUrlVote}:$BUILD_NUMBER")
-                        // Store the image reference in the environment for the next stage
+                        
                         env.VOTE_IMAGE = voteImage.id
                     }
                 }
@@ -28,7 +28,7 @@ pipeline {
         stage('Push Vote Image Dockerhub Registry') {
             steps {
                 script {
-                    // Use the stored image reference to push the image
+                   
                     def voteImage = docker.image(env.VOTE_IMAGE)
                     docker.withRegistry('', registryCredential) {
                         voteImage.push()
@@ -41,11 +41,11 @@ pipeline {
         stage('Build Result Image') {
             steps {
                 script {
-                    // Navigate to the directory containing the Dockerfile
+                   
                     dir('result') {
-                        // Build the Docker image and assign it to a variable
+                        
                         def resultImage = docker.build("${registryUrlResult}:$BUILD_NUMBER")
-                        // Store the image reference in the environment for the next stage
+                    
                         env.RESULT_IMAGE = resultImage.id
                     }
                 }
@@ -55,7 +55,7 @@ pipeline {
         stage('Push Result Image Dockerhub Registry') {
             steps {
                 script {
-                    // Use the stored image reference to push the image
+            
                     def resultImage = docker.image(env.RESULT_IMAGE)
                     docker.withRegistry('', registryCredential) {
                         resultImage.push()
@@ -68,11 +68,11 @@ pipeline {
         stage('Build Worker Image') {
             steps {
                 script {
-                    // Navigate to the directory containing the Dockerfile
+                    
                     dir('worker') {
-                        // Build the Docker image and assign it to a variable
+                        
                         def workerImage = docker.build("${registryUrlWorker}:$BUILD_NUMBER")
-                        // Store the image reference in the environment for the next stage
+            
                         env.WORKER_IMAGE = workerImage.id
                     }
                 }
@@ -82,7 +82,7 @@ pipeline {
         stage('Push Worker Image Dockerhub Registry') {
             steps {
                 script {
-                    // Use the stored image reference to push the image
+                    
                     def workerImage = docker.image(env.WORKER_IMAGE)
                     docker.withRegistry('', registryCredential) {
                         workerImage.push()
