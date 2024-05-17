@@ -91,5 +91,14 @@ pipeline {
                 }
             }
         }
+
+        stage('Deploy using Kubernetes') {
+            agent{label 'kops'}
+            steps {
+                script {
+                    sh "helm upgrade --install votingapp-stack helm/votingapp-charts --set voteimage=${registryUrlVote},resultimage=${registryUrlResult},workerimage=${registryUrlWorker}"
+                }
+            }
+        }
     }
 }
