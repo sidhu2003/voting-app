@@ -1,0 +1,20 @@
+apiVersion: apps/v1 
+kind: Deployment
+metadata:
+  name: worker-deployment
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: voting-app
+      type: worker-app
+  template:
+    metadata:
+      name: worker-pod
+      labels:
+        app: voting-app
+        type: worker-app
+    spec:
+      containers:
+      - name: worker
+        image: {{ .Values.workerimage}}

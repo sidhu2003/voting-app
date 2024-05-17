@@ -1,0 +1,22 @@
+apiVersion: apps/v1 
+kind: Deployment
+metadata:
+  name: result-deployment
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: voting-app
+      type: result-app
+  template:
+    metadata:
+      name: result-pod
+      labels:
+        app: voting-app
+        type: result-app
+    spec:
+      containers:
+      - name: result
+        image: {{ .Values.resultimage}}
+        ports:
+        - containerPort: 4000
