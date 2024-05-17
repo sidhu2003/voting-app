@@ -45,7 +45,7 @@ pipeline {
             }
         }
 
-        stage('Push Vote Image Dockerhub Registry') {
+        stage('Push Result Image Dockerhub Registry') {
             steps {
                 script {
                     docker.withRegistry( '', registryCredential ) {
