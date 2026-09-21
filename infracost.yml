@@ -1,0 +1,33 @@
+# Which stacks Infracost should price.
+#
+# The modules/ directories are deliberately absent — a module on its own has no
+# instantiated resources to cost. Only the live/ layers represent real spend.
+#
+# bootstrap/ is excluded too: an S3 bucket holding a few KB of state rounds to
+# zero and would just add noise to every diff.
+version: 0.1
+
+projects:
+  - path: terraform/live/dev/00-network
+    name: dev-network
+    terraform_var_files: [terraform.tfvars]
+
+  - path: terraform/live/dev/10-platform
+    name: dev-platform
+    terraform_var_files: [terraform.tfvars]
+
+  - path: terraform/live/stage/00-network
+    name: stage-network
+    terraform_var_files: [terraform.tfvars]
+
+  - path: terraform/live/stage/10-platform
+    name: stage-platform
+    terraform_var_files: [terraform.tfvars]
+
+  - path: terraform/live/prod/00-network
+    name: prod-network
+    terraform_var_files: [terraform.tfvars]
+
+  - path: terraform/live/prod/10-platform
+    name: prod-platform
+    terraform_var_files: [terraform.tfvars]

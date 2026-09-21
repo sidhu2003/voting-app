@@ -1,0 +1,40 @@
+# Strategic merge patch: hostnames per environment.
+#
+# `rules` is a plain list with no merge key, so a strategic merge REPLACES the
+# whole list rather than merging into it. That is what we want here — the entire
+# rule is being restated. It is also a common surprise: patching one field of a
+# list item usually means restating the item.
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: vote-ingress
+spec:
+  rules:
+    - host: vote-stage.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: vote-service
+                port:
+                  name: http
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: result-ingress
+spec:
+  rules:
+    - host: results-stage.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: result-service
+                port:
+                  name: http

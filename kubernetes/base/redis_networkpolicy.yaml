@@ -1,0 +1,44 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: redis-netpol
+  labels:
+    app.kubernetes.io/name: redis
+    app.kubernetes.io/component: queue
+    app.kubernetes.io/part-of: voting-app
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: redis
+      app.kubernetes.io/part-of: voting-app
+  policyTypes:
+    - Ingress
+    - Egress
+
+  ingress:
+    # Two producers/consumers, and only these two. Both entries sit under one
+    # `from:` list, which is an OR — vote OR worker may connect on 6379.
+    #
+    # Watch the YAML shape here: two items in one `from:` list is OR. Two
+    # separate `- from:` blocks would also be OR. What is AND is putting
+    # namespaceSelector and podSelector inside a SINGLE list item, which means
+    # "a pod matching X in a namespace matching Y". That distinction is the
+    # most common NetworkPolicy bug.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: vote
+              app.kubernetes.io/part-of: voting-app
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: worker
+              app.kubernetes.io/part-of: voting-app
+      ports:
+        - protocol: TCP
+          port: 6379
+
+  # No egress rules. Redis is a server: it accepts connections and never
+  # initiates them. DNS is granted by the baseline policy and is unused here,
+  # which is fine — it costs nothing and keeps the baseline uniform.
+  egress: []

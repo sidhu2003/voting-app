@@ -1,0 +1,151 @@
+name: terraform-stack
+
+# Reusable workflow: plan or apply ONE stack (one environment, one layer).
+#
+# Called by terraform.yml. Exists so the six stacks are six small call blocks
+# rather than six copies of forty lines. Change the plan logic once, and every
+# environment gets it.
+on:
+  workflow_call:
+    inputs:
+      stack:
+        description: 'Path to the layer, e.g. terraform/live/dev/00-network'
+        required: true
+        type: string
+      environment:
+        description: 'GitHub Environment name — this is what binds approval gates'
+        required: true
+        type: string
+      mode:
+        description: 'plan | apply'
+        required: true
+        type: string
+      aws_region:
+        required: false
+        type: string
+        default: 'ap-south-1'
+      comment_on_pr:
+        description: 'Post the plan as a PR comment'
+        required: false
+        type: boolean
+        default: false
+
+env:
+  TF_IN_AUTOMATION: 'true'
+  TF_CLI_ARGS: '-no-color'
+
+jobs:
+  run:
+    name: ${{ inputs.mode }}
+    runs-on: ubuntu-latest
+
+    # Only bind a GitHub Environment on apply. Binding it on plan would demand
+    # an approval just to SEE what a change would do, which stops people
+    # reviewing plans.
+    environment: ${{ inputs.mode == 'apply' && inputs.environment || '' }}
+
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+
+    defaults:
+      run:
+        working-directory: ${{ inputs.stack }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.15.8'
+          terraform_wrapper: false
+
+      - name: Assume AWS role via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ inputs.aws_region }}
+          role-session-name: gha-tf-${{ inputs.environment }}
+
+      - name: init
+        run: terraform init -input=false
+
+      # ---------------------------------------------------------------- plan
+      - name: plan
+        if: inputs.mode == 'plan'
+        id: plan
+        # -detailed-exitcode: 0 = no changes, 1 = error, 2 = changes present.
+        # continue-on-error lets us post the result before deciding to fail.
+        run: terraform plan -input=false -out=tfplan -detailed-exitcode
+        continue-on-error: true
+
+      - name: Render plan
+        if: inputs.mode == 'plan' && steps.plan.outcome == 'success'
+        run: terraform show tfplan | tail -c 55000 > plan.txt
+
+      - name: Capture error
+        if: inputs.mode == 'plan' && steps.plan.outcome == 'failure'
+        run: echo "Plan failed. See the job log." > plan.txt
+
+      - name: Comment on PR
+        if: inputs.mode == 'plan' && inputs.comment_on_pr && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        env:
+          STACK: ${{ inputs.stack }}
+          OUTCOME: ${{ steps.plan.outcome }}
+        with:
+          script: |
+            const fs = require('fs');
+            const stack = process.env.STACK;
+            const ok = process.env.OUTCOME === 'success';
+            const plan = fs.readFileSync(`${stack}/plan.txt`, 'utf8');
+
+            // One comment per stack, updated in place rather than a new comment
+            // on every push. Six stacks x ten pushes would otherwise bury the
+            // discussion under sixty comments.
+            const marker = `<!-- tf-plan:${stack} -->`;
+            const body = [
+              marker,
+              `### ${ok ? '📋' : '❌'} \`${stack}\``,
+              '',
+              '<details><summary>Show plan</summary>',
+              '', '```terraform', plan, '```', '',
+              '</details>',
+              '',
+              ok
+                ? '_Check the destroy count before approving._'
+                : '_Plan failed. If this is a `10-platform` stack, its `00-network` layer may not be applied yet._'
+            ].join('\n');
+
+            const { data: comments } = await github.rest.issues.listComments({
+              issue_number: context.issue.number,
+              owner: context.repo.owner, repo: context.repo.repo, per_page: 100
+            });
+            const existing = comments.find(c => c.body.includes(marker));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                comment_id: existing.id, owner: context.repo.owner,
+                repo: context.repo.repo, body });
+            } else {
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number, owner: context.repo.owner,
+                repo: context.repo.repo, body });
+            }
+
+      - name: Fail if the plan errored
+        if: inputs.mode == 'plan' && steps.plan.outcome == 'failure'
+        run: exit 1
+
+      # --------------------------------------------------------------- apply
+      # Re-plans rather than reusing the PR's tfplan, because that artifact is
+      # from a different commit and possibly hours old. The GitHub Environment
+      # approval is the human gate; -auto-approve just skips the tty prompt.
+      - name: apply
+        if: inputs.mode == 'apply'
+        run: terraform apply -input=false -auto-approve
+
+      - name: outputs
+        if: inputs.mode == 'apply'
+        run: terraform output || true

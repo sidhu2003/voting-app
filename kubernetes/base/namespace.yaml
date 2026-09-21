@@ -1,0 +1,43 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: voting
+  labels:
+    app.kubernetes.io/name: voting
+    app.kubernetes.io/component: namespace
+    app.kubernetes.io/part-of: voting-app
+    app.kubernetes.io/managed-by: siddardha
+
+    # --- Pod Security Standards ---------------------------------------------
+    #
+    # Turns hardening from a convention into a control. Without these labels the
+    # manifests happen to be hardened; with them, an unhardened pod cannot be
+    # created here at all. The API server rejects it at admission.
+    #
+    # `restricted` requires: non-root with a non-zero uid, no privilege
+    # escalation, all capabilities dropped, seccompProfile set, no host
+    # namespaces, no hostPath, no host ports.
+    #
+    # enforce = reject it   warn = allow but print a warning   audit = log it
+    #
+    # ROLLOUT ORDER MATTERS. Add seccompProfile to the workloads FIRST, or every
+    # deploy starts failing. If you are ever unsure, comment out `enforce` and
+    # apply with warn+audit only — you see what would break without breaking it,
+    # then switch enforce on once it is quiet.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    #
+    # NOTE on `latest`: it means "evaluate against whatever this cluster's
+    # version of restricted says". Simple, but a cluster upgrade could tighten
+    # the rules under you and start rejecting pods. Pinning to a concrete
+    # version (e.g. v1.33) makes that an explicit decision instead of a
+    # surprise. Pinned is the safer choice for production.
+    #
+    # NOTE on scope: this applies to THIS namespace only. ingress-nginx needs
+    # NET_BIND_SERVICE to bind port 80, so its namespace cannot be `restricted`
+    # — infrastructure components often need `baseline` instead. Knowing why an
+    # exception exists beats assuming everything can be locked to the maximum.

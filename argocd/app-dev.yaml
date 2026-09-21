@@ -1,0 +1,106 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: voting-app-dev
+  namespace: argocd
+  # Without this finalizer, deleting the Application leaves every resource it
+  # created orphaned in the cluster. With it, deletion cascades properly.
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  source:
+    repoURL: https://github.com/venkata-siddardha/voting-app.git
+    targetRevision: main
+    # Argo detects kustomize automatically from kustomization.yaml.
+    path: kubernetes/overlays/dev
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: voting-dev
+
+  syncPolicy:
+    # ------------------------------------------------------------------------
+    # AUTOMATED, enabled after the app reported Synced/Healthy on its own.
+    #
+    # Doing this in that order matters: turning on prune before confirming a
+    # clean sync is how people delete a running namespace on day one, because
+    # Argo reconciles the cluster to git and "reconcile" means "delete" when git
+    # is behind.
+    # ------------------------------------------------------------------------
+    automated:
+      # Delete resources that git no longer declares. Without this, removing a
+      # manifest leaves the object running forever and git stops describing
+      # reality.
+      prune: true
+
+      # Revert changes made directly against the cluster.
+      #
+      # This is the control that would have caught INCIDENT-001 on its own: the
+      # live `kubectl patch` on redis-secret would have been reverted within
+      # minutes instead of waiting for a user to report broken voting.
+      #
+      # It is also why the two ignoreDifferences below are load-bearing -- with
+      # selfHeal on, an un-ignored HPA replica count would put Argo in a fight
+      # with the autoscaler.
+      selfHeal: true
+
+      # Do not prune a resource whose disappearance Argo cannot explain. Guards
+      # against a bad render deleting everything.
+      allowEmpty: false
+
+    syncOptions:
+      - CreateNamespace=true
+      # Argo's server-side diff avoids false "OutOfSync" noise from fields the
+      # API server defaults in (like an empty creationTimestamp).
+      - ServerSideApply=true
+
+  # ---------------------------------------------------------------------------
+  # Fields Argo must NOT treat as drift.
+  #
+  # Both of these are permanent OutOfSync otherwise — syncing cannot fix them,
+  # because something other than git legitimately owns the value.
+  # ---------------------------------------------------------------------------
+  ignoreDifferences:
+    # The HPA owns replicas. git says 2, the HPA scaled to 3, and both are
+    # correct. Without this Argo reports drift forever, and with selfHeal on it
+    # would actively fight the autoscaler — scaling down to 2, the HPA scaling
+    # back to 3, in a loop.
+    # Th67e API server defaults volumeMode: Filesystem and adds status: {} to
+    # every volumeClaimTemplate. git has neither, so Argo sees a difference
+    # that reappears the instant it is "fixed". volumeClaimTemplates are also
+    # immutable on an existing StatefulSet, so there is nothing to sync anyway.
+    - group: apps
+      kind: StatefulSet
+      jsonPointers:
+        - /spec/volumeClaimTemplates
+
+    # Argo ROLLOUTS writes `rollouts-pod-template-hash` into the Service
+    # selector to steer traffic between blue and green. Argo CD sees that as
+    # drift from git and, with selfHeal on, would revert it mid-cutover --
+    # sending traffic to the wrong version or to nothing at all.
+    #
+    # Two Argo products fighting over one field. This is the interaction to
+    # know about when running Rollouts under Argo CD.
+    - group: ""
+      kind: Service
+      name: vote-service
+      jsonPointers:
+        - /spec/selector
+    - group: ""
+      kind: Service
+      name: vote-preview-service
+      jsonPointers:
+        - /spec/selector
+
+    # The Rollout controller owns replica count during a cutover, and the HPA
+    # owns it the rest of the time. Neither is git.
+    - group: argoproj.io
+      kind: Rollout
+      name: vote-deployment
+      jsonPointers:
+        - /spec/replicas
+
+  # Keep 10 revisions of history so rollback in the UI has something to offer.
+  revisionHistoryLimit: 10

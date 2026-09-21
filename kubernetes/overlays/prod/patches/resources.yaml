@@ -1,0 +1,110 @@
+# Production sizing. Still derived from measurement, with more headroom for
+# traffic that dev never sees.
+#
+# CPU limits remain deleted — throttling hurts tail latency, and requests
+# already guarantee the share. Memory limits stay, because memory is
+# incompressible.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: result-deployment
+spec:
+  template:
+    spec:
+      containers:
+        - name: result
+          resources:
+            requests:
+              cpu: 100m
+              memory: 192Mi
+            limits:
+              cpu: null
+              memory: 384Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker-deployment
+spec:
+  template:
+    spec:
+      containers:
+        - name: worker
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: null
+              memory: 256Mi
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: db-statefulset
+spec:
+  template:
+    spec:
+      containers:
+        - name: db
+          resources:
+            requests:
+              cpu: 500m
+              # Postgres performance is largely page cache. This is the one
+              # place to be generous.
+              memory: 2Gi
+            limits:
+              cpu: null
+              memory: 4Gi
+  # volumeClaimTemplates has no strategic merge key, so the whole entry is
+  # restated. Note this is IMMUTABLE on an existing StatefulSet — it only
+  # applies on first creation.
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: gp3
+        resources:
+          requests:
+            storage: 20Gi
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis-statefulset
+spec:
+  template:
+    spec:
+      containers:
+        - name: redis
+          # args is a plain list with no merge key, so it is replaced wholesale.
+          # maxmemory rises to 1gb, and the memory LIMIT below must stay above
+          # it or a full queue means OOMKill instead of Redis eviction.
+          args:
+            - redis-server
+            - --requirepass
+            - $(REDIS_PASSWORD)
+            - --appendonly
+            - "yes"
+            - --maxmemory
+            - 1gb
+            - --maxmemory-policy
+            - noeviction
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: null
+              memory: 1536Mi
+  volumeClaimTemplates:
+    - metadata:
+        name: redis-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: gp3
+        resources:
+          requests:
+            storage: 10Gi

@@ -1,0 +1,389 @@
+name: terraform
+
+on:
+  pull_request:
+    paths: ['terraform/**', '.github/workflows/terraform*.yml']
+  push:
+    branches: [main]
+    paths: ['terraform/**', '.github/workflows/terraform*.yml']
+  # Manual promotion to stage and prod. Infrastructure is not auto-applied to
+  # anything above dev — a merge should not silently change production.
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to apply'
+        required: true
+        type: choice
+        options: [stage, prod]
+      layer:
+        description: 'Which layer (network first, always)'
+        required: true
+        type: choice
+        options: [00-network, 10-platform, both]
+        default: both
+
+concurrency:
+  group: terraform-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  TF_VERSION: '1.15.8'
+  TF_IN_AUTOMATION: 'true'
+  TF_CLI_ARGS: '-no-color'
+
+jobs:
+  # ===========================================================================
+  # STATIC CHECKS — no AWS credentials required. Four jobs, whole tree.
+  # ===========================================================================
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with: { terraform_version: '1.15.8', terraform_wrapper: false }
+      - run: terraform fmt -check -recursive -diff terraform/
+
+  validate:
+    name: validate
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        dir:
+          - terraform/bootstrap
+          - terraform/modules/vpc
+          - terraform/modules/eks-iam
+          - terraform/modules/irsa
+          - terraform/live/dev/00-network
+          - terraform/live/dev/10-platform
+          - terraform/live/stage/00-network
+          - terraform/live/stage/10-platform
+          - terraform/live/prod/00-network
+          - terraform/live/prod/10-platform
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with: { terraform_version: '1.15.8', terraform_wrapper: false }
+      - uses: actions/cache@v4
+        with:
+          path: ~/.terraform.d/plugin-cache
+          key: tf-plugins-${{ runner.os }}-${{ hashFiles('**/.terraform.lock.hcl') }}
+          restore-keys: tf-plugins-${{ runner.os }}-
+      - run: mkdir -p ~/.terraform.d/plugin-cache
+      - run: terraform -chdir=${{ matrix.dir }} init -backend=false -input=false
+        env: { TF_PLUGIN_CACHE_DIR: '~/.terraform.d/plugin-cache' }
+      - run: terraform -chdir=${{ matrix.dir }} validate
+
+  lint:
+    name: tflint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: terraform-linters/setup-tflint@v4
+        with: { tflint_version: latest }
+      - run: tflint --init --chdir=terraform
+        env: { GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}' }
+      - run: tflint --recursive --chdir=terraform --config="$(pwd)/terraform/.tflint.hcl"
+
+  security:
+    name: trivy
+    runs-on: ubuntu-latest
+    permissions: { contents: read, security-events: write }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: config
+          scan-ref: terraform/
+          format: sarif
+          output: trivy.sarif
+          exit-code: '0'      # report, do not block, until findings are triaged
+          severity: CRITICAL,HIGH
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with: { sarif_file: trivy.sarif }
+      - uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: config
+          scan-ref: terraform/
+          format: table
+          exit-code: '0'
+          severity: CRITICAL,HIGH
+
+  # ===========================================================================
+  # COST — what does this pull request do to the monthly bill?
+  #
+  # Infracost parses the HCL directly, so this needs NO AWS credentials — only
+  # an API key (free tier). It works today, unlike plan and apply.
+  #
+  # Why it belongs on every PR: cost is a design constraint, not an end-of-month
+  # surprise. Nearly every decision in terraform/DECISIONS.md was cost-driven —
+  # single NAT in dev, SPOT nodes, no KMS key outside prod. This makes that
+  # reasoning visible at review time, when it can still change the outcome.
+  # ===========================================================================
+  cost:
+    name: infracost
+    runs-on: ubuntu-latest
+    # Gated on a repository VARIABLE, not the secret.
+    #
+    # A job-level `if:` can only read the github, needs, vars and inputs
+    # contexts — `secrets` and `env` are unavailable there. So enabling this
+    # takes two settings: the secret INFRACOST_API_KEY for the API call, and
+    # the variable INFRACOST_ENABLED=true to switch the job on.
+    if: github.event_name == 'pull_request' && vars.INFRACOST_ENABLED == 'true'
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: infracost/actions/setup@v3
+        with:
+          api-key: ${{ secrets.INFRACOST_API_KEY }}
+
+      # Baseline: price the target branch first, so the comment can show a
+      # DELTA rather than an absolute number. "+$96/month" is actionable;
+      # "$412/month" needs someone to remember what it was yesterday.
+      - name: Checkout base
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.ref }}
+
+      - name: Baseline cost
+        run: |
+          infracost breakdown --config-file=infracost.yml \
+            --format=json --out-file=/tmp/base.json
+
+      - name: Checkout PR
+        uses: actions/checkout@v4
+
+      - name: Cost diff
+        run: |
+          infracost diff --config-file=infracost.yml \
+            --compare-to=/tmp/base.json \
+            --format=json --out-file=/tmp/diff.json
+
+      - name: Comment
+        run: |
+          infracost comment github \
+            --path=/tmp/diff.json \
+            --repo="$GITHUB_REPOSITORY" \
+            --pull-request=${{ github.event.pull_request.number }} \
+            --github-token=${{ secrets.GITHUB_TOKEN }} \
+            --behavior=update      # one comment, edited in place
+
+  # ===========================================================================
+  # WHICH ENVIRONMENTS DID THIS CHANGE TOUCH?
+  #
+  # A change under modules/ affects all three, so plan all three. A change under
+  # live/dev/ affects only dev. Without this every PR plans six stacks and the
+  # signal drowns.
+  # ===========================================================================
+  changed:
+    name: detect changes
+    runs-on: ubuntu-latest
+    # paths-filter needs a base commit to diff against; a manual dispatch has
+    # none. The promote jobs do not consult this output anyway.
+    if: github.event_name != 'workflow_dispatch'
+    outputs:
+      dev:   ${{ steps.f.outputs.dev }}
+      stage: ${{ steps.f.outputs.stage }}
+      prod:  ${{ steps.f.outputs.prod }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: f
+        with:
+          filters: |
+            shared: &shared
+              - 'terraform/modules/**'
+              - '.github/workflows/terraform*.yml'
+            dev:
+              - *shared
+              - 'terraform/live/dev/**'
+            stage:
+              - *shared
+              - 'terraform/live/stage/**'
+            prod:
+              - *shared
+              - 'terraform/live/prod/**'
+
+  # ===========================================================================
+  # PLAN — pull requests only. Every affected stack, in parallel, each posting
+  # its own PR comment.
+  #
+  # A 10-platform plan will fail if its 00-network layer has never been applied,
+  # because it reads that layer's remote state. That is real information, not a
+  # pipeline bug, and the comment says so.
+  # ===========================================================================
+  plan-dev-network:
+    if: github.event_name == 'pull_request' && needs.changed.outputs.dev == 'true' && vars.AWS_ROLE_ARN != ''
+    needs: [fmt, validate, changed]
+    # A called workflow's token cannot exceed its caller's. terraform-stack
+    # declares id-token (OIDC) and pull-requests (plan comment), so the
+    # calling job must grant at least those or GitHub rejects the workflow
+    # before any job starts.
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+    uses: ./.github/workflows/terraform-stack.yml
+    with: { stack: terraform/live/dev/00-network, environment: dev, mode: plan, comment_on_pr: true }
+
+  plan-dev-platform:
+    if: github.event_name == 'pull_request' && needs.changed.outputs.dev == 'true' && vars.AWS_ROLE_ARN != ''
+    needs: [fmt, validate, changed]
+    # A called workflow's token cannot exceed its caller's. terraform-stack
+    # declares id-token (OIDC) and pull-requests (plan comment), so the
+    # calling job must grant at least those or GitHub rejects the workflow
+    # before any job starts.
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+    uses: ./.github/workflows/terraform-stack.yml
+    with: { stack: terraform/live/dev/10-platform, environment: dev, mode: plan, comment_on_pr: true }
+
+  plan-stage-network:
+    if: github.event_name == 'pull_request' && needs.changed.outputs.stage == 'true' && vars.AWS_ROLE_ARN != ''
+    needs: [fmt, validate, changed]
+    # A called workflow's token cannot exceed its caller's. terraform-stack
+    # declares id-token (OIDC) and pull-requests (plan comment), so the
+    # calling job must grant at least those or GitHub rejects the workflow
+    # before any job starts.
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+    uses: ./.github/workflows/terraform-stack.yml
+    with: { stack: terraform/live/stage/00-network, environment: stage, mode: plan, comment_on_pr: true }
+
+  plan-stage-platform:
+    if: github.event_name == 'pull_request' && needs.changed.outputs.stage == 'true' && vars.AWS_ROLE_ARN != ''
+    needs: [fmt, validate, changed]
+    # A called workflow's token cannot exceed its caller's. terraform-stack
+    # declares id-token (OIDC) and pull-requests (plan comment), so the
+    # calling job must grant at least those or GitHub rejects the workflow
+    # before any job starts.
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+    uses: ./.github/workflows/terraform-stack.yml
+    with: { stack: terraform/live/stage/10-platform, environment: stage, mode: plan, comment_on_pr: true }
+
+  plan-prod-network:
+    if: github.event_name == 'pull_request' && needs.changed.outputs.prod == 'true' && vars.AWS_ROLE_ARN != ''
+    needs: [fmt, validate, changed]
+    # A called workflow's token cannot exceed its caller's. terraform-stack
+    # declares id-token (OIDC) and pull-requests (plan comment), so the
+    # calling job must grant at least those or GitHub rejects the workflow
+    # before any job starts.
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+    uses: ./.github/workflows/terraform-stack.yml
+    with: { stack: terraform/live/prod/00-network, environment: prod, mode: plan, comment_on_pr: true }
+
+  plan-prod-platform:
+    if: github.event_name == 'pull_request' && needs.changed.outputs.prod == 'true' && vars.AWS_ROLE_ARN != ''
+    needs: [fmt, validate, changed]
+    # A called workflow's token cannot exceed its caller's. terraform-stack
+    # declares id-token (OIDC) and pull-requests (plan comment), so the
+    # calling job must grant at least those or GitHub rejects the workflow
+    # before any job starts.
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+    uses: ./.github/workflows/terraform-stack.yml
+    with: { stack: terraform/live/prod/10-platform, environment: prod, mode: plan, comment_on_pr: true }
+
+  # ===========================================================================
+  # APPLY — dev only, on merge to main.
+  #
+  # Layers run SEQUENTIALLY: 10-platform reads 00-network's remote state, so
+  # applying them in parallel is a race. `needs:` is the ordering.
+  # ===========================================================================
+  apply-dev-network:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.changed.outputs.dev == 'true' && vars.AWS_ROLE_ARN != ''
+    needs: [fmt, validate, lint, changed]
+    # A called workflow's token cannot exceed its caller's. terraform-stack
+    # declares id-token (OIDC) and pull-requests (plan comment), so the
+    # calling job must grant at least those or GitHub rejects the workflow
+    # before any job starts.
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+    uses: ./.github/workflows/terraform-stack.yml
+    with: { stack: terraform/live/dev/00-network, environment: dev, mode: apply }
+
+  apply-dev-platform:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.changed.outputs.dev == 'true' && vars.AWS_ROLE_ARN != ''
+    # `changed` must be listed here, not just in apply-dev-network. A job can
+    # only read `needs.<job>.outputs` for jobs it actually declares as needs —
+    # referencing one it does not depend on is a schema error that rejects the
+    # whole workflow before any job starts.
+    needs: [changed, apply-dev-network]        # network first, always
+    # A called workflow's token cannot exceed its caller's. terraform-stack
+    # declares id-token (OIDC) and pull-requests (plan comment), so the
+    # calling job must grant at least those or GitHub rejects the workflow
+    # before any job starts.
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+    uses: ./.github/workflows/terraform-stack.yml
+    with: { stack: terraform/live/dev/10-platform, environment: dev, mode: apply }
+
+  # ===========================================================================
+  # PROMOTE — stage and prod, manual only.
+  #
+  # Deliberately NOT triggered by a merge. Applying production infrastructure
+  # because someone merged a pull request is how outages happen. A human picks
+  # the environment, and the GitHub Environment's required reviewers gate it
+  # again before the job starts.
+  # ===========================================================================
+  promote-network:
+    if: github.event_name == 'workflow_dispatch' && (inputs.layer == '00-network' || inputs.layer == 'both')
+    # A called workflow's token cannot exceed its caller's. terraform-stack
+    # declares id-token (OIDC) and pull-requests (plan comment), so the
+    # calling job must grant at least those or GitHub rejects the workflow
+    # before any job starts.
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+    uses: ./.github/workflows/terraform-stack.yml
+    with:
+      stack: terraform/live/${{ inputs.environment }}/00-network
+      environment: ${{ inputs.environment }}
+      mode: apply
+
+  promote-platform:
+    needs: [promote-network]
+    # `always()` is required: when layer == '10-platform' the network job is
+    # SKIPPED, and a skipped dependency would skip this job too. The
+    # `!failure() && !cancelled()` guard keeps the ordering meaningful for a
+    # 'both' run — if the network layer fails, the platform layer must not run.
+    if: >-
+      always() && !failure() && !cancelled()
+      && github.event_name == 'workflow_dispatch'
+      && (inputs.layer == '10-platform' || inputs.layer == 'both')
+    # A called workflow's token cannot exceed its caller's. terraform-stack
+    # declares id-token (OIDC) and pull-requests (plan comment), so the
+    # calling job must grant at least those or GitHub rejects the workflow
+    # before any job starts.
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+    uses: ./.github/workflows/terraform-stack.yml
+    with:
+      stack: terraform/live/${{ inputs.environment }}/10-platform
+      environment: ${{ inputs.environment }}
+      mode: apply

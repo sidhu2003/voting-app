@@ -1,0 +1,41 @@
+# Teaches kustomize where a Rollout keeps its ConfigMap/Secret references.
+#
+# The generators append a content hash to every ConfigMap and Secret name, and
+# kustomize rewrites references to match — but only for kinds it has a built-in
+# schema for. A Rollout is a CRD, so those rewrites are skipped silently and the
+# pod ends up asking for `voteapp-redis-config` when the object is really
+# `voteapp-redis-config-mg788dc68k`. The pod then fails with
+# CreateContainerConfigError.
+#
+# Same root cause as needing JSON6902 for the resource patches: kustomize knows
+# nothing about CRD structure unless you tell it.
+nameReference:
+  - kind: ConfigMap
+    version: v1
+    fieldSpecs:
+      - path: spec/template/spec/containers/envFrom/configMapRef/name
+        kind: Rollout
+      - path: spec/template/spec/containers/env/valueFrom/configMapKeyRef/name
+        kind: Rollout
+      - path: spec/template/spec/initContainers/envFrom/configMapRef/name
+        kind: Rollout
+
+  - kind: Secret
+    version: v1
+    fieldSpecs:
+      - path: spec/template/spec/containers/envFrom/secretRef/name
+        kind: Rollout
+      - path: spec/template/spec/containers/env/valueFrom/secretKeyRef/name
+        kind: Rollout
+      - path: spec/template/spec/imagePullSecrets/name
+        kind: Rollout
+
+  - kind: Service
+    version: v1
+    fieldSpecs:
+      # blueGreen names its two Services by string; if a namePrefix or
+      # nameSuffix is ever added, these must follow it or the cutover breaks.
+      - path: spec/strategy/blueGreen/activeService
+        kind: Rollout
+      - path: spec/strategy/blueGreen/previewService
+        kind: Rollout

@@ -1,0 +1,61 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: result-ingress
+  labels:
+    app.kubernetes.io/name: result
+    app.kubernetes.io/component: dashboard
+    app.kubernetes.io/part-of: voting-app
+    app.kubernetes.io/managed-by: kustomize
+  annotations:
+    # --- Sticky sessions -----------------------------------------------------
+    # Socket.IO opens with HTTP long-polling: a multi-request handshake where
+    # only the pod that created the session knows about it. Those requests must
+    # all reach the same pod or the handshake fails.
+    #
+    # Cookie affinity, NOT Service-level sessionAffinity: ClientIP. Behind an
+    # Ingress the Service only sees the controller's pod IP, so IP affinity
+    # would pin every user to one pod. The cookie identifies the browser.
+    nginx.ingress.kubernetes.io/affinity: cookie
+    nginx.ingress.kubernetes.io/affinity-mode: persistent
+    nginx.ingress.kubernetes.io/session-cookie-name: result-affinity
+    nginx.ingress.kubernetes.io/session-cookie-max-age: "86400"
+    nginx.ingress.kubernetes.io/session-cookie-path: /
+
+    # --- WebSocket -----------------------------------------------------------
+    # nginx performs the HTTP-101 upgrade itself, but its default 60s read
+    # timeout would kill an idle WebSocket. This app pushes a message every
+    # second so it rarely idles, but do not rely on that.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+
+    # --- On EKS, replace everything above with: ------------------------------
+    # alb.ingress.kubernetes.io/scheme: internet-facing
+    # alb.ingress.kubernetes.io/target-type: ip
+    # alb.ingress.kubernetes.io/group.name: voting-app
+    # alb.ingress.kubernetes.io/target-group-attributes: >-
+    #   stickiness.enabled=true,stickiness.type=lb_cookie,stickiness.lb_cookie.duration_seconds=86400
+    #
+    # ALBs handle WebSockets natively, so no upgrade annotation is needed. The
+    # ALB is placed using the kubernetes.io/role/elb=1 tag that modules/vpc
+    # already puts on the public subnets.
+spec:
+  ingressClassName: nginx
+
+  # tls:
+  #   - hosts: [results.local]
+  #     secretName: result-tls
+
+  rules:
+    - host: results.local
+      http:
+        paths:
+          # Everything, including /socket.io/, goes to result. Host-based
+          # routing means no rewriting and no path collisions with vote.
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: result-service
+                port:
+                  name: http

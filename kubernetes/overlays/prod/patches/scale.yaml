@@ -1,0 +1,57 @@
+# Three replicas of each stateless tier, so losing one node still leaves two
+# serving and a rolling update never drops below two.
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: vote-deployment
+spec:
+  replicas: 3
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: result-deployment
+spec:
+  replicas: 3
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker-deployment
+spec:
+  replicas: 3
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: vote-hpa
+spec:
+  minReplicas: 3
+  maxReplicas: 12
+---
+# With 3 replicas, minAvailable: 2 keeps real capacity during a drain rather
+# than the bare survival that minAvailable: 1 guarantees.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: vote-pdb
+spec:
+  minAvailable: 2
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: result-pdb
+spec:
+  minAvailable: 2
+---
+# worker moves from maxUnavailable to minAvailable now that there are three of
+# them — at 1 replica minAvailable would have deadlocked every node drain.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: worker-pdb
+spec:
+  maxUnavailable: null
+  minAvailable: 2

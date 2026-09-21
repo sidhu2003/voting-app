@@ -1,0 +1,75 @@
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: vote-hpa
+  labels:
+    app.kubernetes.io/name: vote
+    app.kubernetes.io/component: frontend
+    app.kubernetes.io/part-of: voting-app
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  # Targets the ROLLOUT, not a Deployment. Argo Rollouts implements the /scale
+  # subresource, so the HPA drives it exactly as it would a Deployment -- but
+  # the kind and apiVersion must match or the HPA reports
+  # "failed to get scale: no matches for kind".
+  scaleTargetRef:
+    apiVersion: argoproj.io/v1alpha1
+    kind: Rollout
+    name: vote-deployment
+
+  # minReplicas: 2, not 1. Scaling to a single replica means any disruption is
+  # a full outage, and it fights the PodDisruptionBudget.
+  minReplicas: 2
+  # maxReplicas is a cost ceiling as much as a capacity one — it bounds what a
+  # runaway autoscaler (or a traffic flood) can spend.
+  maxReplicas: 6
+
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          # CRITICAL: this is a percentage of the CPU **request**, not of the
+          # node. With requests at 250m and real usage around 15m, utilisation
+          # sits near 6% and this HPA would never fire no matter the load.
+          #
+          # Right-sizing requests is therefore a PREREQUISITE for autoscaling,
+          # not a separate cost exercise. At a 50m request, 15m idle is 30% and
+          # the signal becomes meaningful.
+          averageUtilization: 70
+
+  behavior:
+    scaleUp:
+      # React quickly to load.
+      stabilizationWindowSeconds: 30
+      policies:
+        - type: Percent
+          value: 100          # at most double
+          periodSeconds: 30
+    scaleDown:
+      # Come down slowly. Five minutes of stability before shrinking prevents
+      # flapping on spiky traffic, where the cost of an extra pod is far lower
+      # than the cost of thrashing.
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60
+
+# ---------------------------------------------------------------------------
+# NO HPA for result or worker, deliberately.
+#
+# result: polls Postgres once per second PER REPLICA regardless of how many
+#   users are connected. Its CPU is flat, so a CPU-based HPA would never fire
+#   under real load and would scale on noise. The meaningful signal is
+#   concurrent WebSocket connections, which needs a custom metric.
+#
+# worker: polls Redis every 100ms unconditionally and runs `SELECT 1` when the
+#   queue is empty, so it burns ~10 queries/sec at total idle. CPU is flat here
+#   too. The correct signal is Redis queue depth (LLEN votes) via KEDA, which
+#   is also the metric that should be alerting.
+#
+# Blanket-applying HPAs to every workload is the mistake. Autoscale on the
+# signal that actually correlates with load for that specific component.
+# ---------------------------------------------------------------------------

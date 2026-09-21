@@ -1,0 +1,44 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: vote-netpol
+  labels:
+    app.kubernetes.io/name: vote
+    app.kubernetes.io/component: frontend
+    app.kubernetes.io/part-of: voting-app
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: vote
+      app.kubernetes.io/part-of: voting-app
+  policyTypes:
+    - Ingress
+    - Egress
+
+  ingress:
+    # Users do not reach these pods directly — the ingress controller does.
+    # So the source is the ingress-nginx namespace, not an IP range.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 4000
+
+  egress:
+    # vote's only dependency is Redis. It never touches Postgres, so there is
+    # no rule for it — and if someone later adds a database call to vote, it
+    # will fail here and force a deliberate decision rather than sneaking in.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: redis
+              app.kubernetes.io/part-of: voting-app
+      ports:
+        - protocol: TCP
+          port: 6379
+  # DNS egress comes from allow-dns-egress in networkpolicy_baseline.yaml.
+  # Multiple policies selecting the same pod are ADDITIVE — the union of all
+  # their allow rules applies. There is no ordering or precedence.

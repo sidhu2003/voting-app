@@ -1,0 +1,53 @@
+name: lint-workflows
+
+# Validates the workflow files themselves against the GitHub Actions SCHEMA —
+# not just YAML syntax.
+#
+# This exists because two workflows were pushed that parsed as perfectly valid
+# YAML and were then rejected by GitHub before a single job started:
+#
+#   app.yml       both `paths` and `paths-ignore` on the same event
+#   terraform.yml `needs.changed.outputs` read by a job that did not list
+#                 `changed` in its own `needs`
+#
+# actionlint does NOT catch everything. It missed a third one: a reusable
+# workflow requesting more token permissions than its caller granted, which
+# also rejects the workflow at startup. Cross-workflow permission escalation is
+# outside what a single-file linter can see.
+#
+# A "startup failure" gives you almost no diagnostic output, so these are
+# genuinely unpleasant to debug after the fact. actionlint catches both in
+# under a second, locally.
+#
+# Run it before pushing. Use the DOCKER image, not the bare binary — the image
+# bundles shellcheck and pyflakes, so it lints every `run:` block too. The
+# standalone binary silently skips those checks if the tools are absent, which
+# is how a shellcheck finding reached CI:
+#
+#   docker run --rm -v "$(pwd)":/repo -w /repo rhysd/actionlint:latest
+on:
+  pull_request:
+    paths: ['.github/workflows/**']
+  push:
+    branches: [main]
+    paths: ['.github/workflows/**']
+
+permissions:
+  contents: read
+
+jobs:
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run actionlint
+        uses: docker://rhysd/actionlint:latest
+        with:
+          # -color for readable output in the Actions log.
+          args: -color
+
+      # actionlint also runs shellcheck over every `run:` block, which catches
+      # unquoted variables and similar. Those are reported above; this job fails
+      # on any finding.

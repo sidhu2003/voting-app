@@ -1,0 +1,112 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# ---------------------------------------------------------------------------
+# BASE — the complete, working application with no environment-specific values.
+#
+# The base is never applied directly. `kubectl apply -k overlays/dev` is how you
+# deploy. If you find yourself wanting to edit the base for one environment,
+# that difference belongs in an overlay patch instead.
+# ---------------------------------------------------------------------------
+
+resources:
+  - namespace.yaml
+
+  # vote — public web tier
+  - vote_rollout.yaml
+  - vote_service.yaml
+  - vote_preview_service.yaml
+  - vote_ingress.yaml
+  - vote_hpa.yaml
+  - vote_pdb.yaml
+  - vote_networkpolicy.yaml
+
+  # result — dashboard
+  - result_deployment.yaml
+  - result_service.yaml
+  - result_ingress.yaml
+  - result_pdb.yaml
+  - result_networkpolicy.yaml
+
+  # worker — queue consumer, no inbound anything
+  - worker_deployment.yaml
+  - worker_pdb.yaml
+  - worker_networkpolicy.yaml
+
+  # datastores
+  - db_deployment.yaml
+  - db_service.yaml
+  - db_networkpolicy.yaml
+  - redis_deployment.yaml
+  - redis_service.yaml
+  - redis_networkpolicy.yaml
+
+  # default-deny + DNS allow, must exist for the per-component policies to mean
+  # anything
+  - networkpolicy_baseline.yaml
+
+# ---------------------------------------------------------------------------
+# Generators.
+#
+# THIS IS THE MAIN REASON TO USE KUSTOMIZE. A generated ConfigMap gets a hash of
+# its contents appended to its name — `voteapp-db-config-7f8d9c2b4h`. Change a
+# value and the name changes, which changes the Deployment's pod spec, which
+# triggers a rolling update automatically.
+#
+# Without this, editing a ConfigMap does NOTHING to running pods: environment
+# variables are read once at container start. That is exactly the mechanism
+# behind INCIDENT-001 — see docs/incidents/.
+#
+# Kustomize rewrites every reference (envFrom, configMapKeyRef, secretKeyRef)
+# to the hashed name for you.
+# ---------------------------------------------------------------------------
+configurations:
+  - nameReference.yaml
+
+configMapGenerator:
+  - name: voteapp-redis-config
+    envs: [config/redis.env]
+  - name: voteapp-db-config
+    envs: [config/db.env]
+  - name: voteapp-vote-config
+    envs: [config/vote.env]
+
+secretGenerator:
+  - name: redis-secret
+    envs: [secrets/redis.env]
+    type: Opaque
+  - name: db-secret
+    envs: [secrets/db.env]
+    type: Opaque
+
+# KNOWN GAP: real credentials in git. The production answer is External Secrets
+# Operator syncing from AWS Secrets Manager, or SOPS-encrypted files. These are
+# demo values matching docker-compose.yml.
+
+generatorOptions:
+  # Keep the hash suffix — disabling it throws away the automatic-rollout
+  # behaviour described above, which is the whole point.
+  disableNameSuffixHash: false
+
+# ---------------------------------------------------------------------------
+# Labels applied to every resource.
+#
+# includeSelectors is FALSE and that is deliberate. Setting it true would inject
+# these into spec.selector.matchLabels, which is IMMUTABLE on a Deployment or
+# StatefulSet — every future apply would fail with "field is immutable" until
+# you deleted the workload. The selectors are already defined correctly in the
+# resource files as name + part-of, and nothing should add to them.
+# ---------------------------------------------------------------------------
+labels:
+  - includeSelectors: false
+    pairs:
+      app.kubernetes.io/part-of: voting-app
+      app.kubernetes.io/managed-by: kustomize
+
+images:
+  - name: programmer175/voteapp_vote
+    newTag: local
+  - name: programmer175/voteapp_result
+    newTag: local
+  - name: programmer175/voteapp_worker
+    newTag: local

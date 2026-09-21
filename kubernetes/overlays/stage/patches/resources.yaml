@@ -1,0 +1,88 @@
+# Strategic merge patch: right-sized requests.
+#
+# These numbers come from `kubectl top` on a running cluster, not from guessing.
+# Measured idle usage was roughly:
+#   vote 15m/137Mi   result 9m/64Mi   worker 32m/41Mi
+#   postgres 30m/30Mi   redis 18m/4Mi
+# against requests of 250m/512Mi each — about 14x over on CPU.
+#
+# `containers` merges on the `name` key, which is why each patch names its
+# container but omits everything else about it.
+#
+# `cpu: null` DELETES the CPU limit. A CPU limit causes CFS throttling at the
+# quota boundary even when the node is idle; requests already guarantee your
+# share. Memory limits stay, because memory is incompressible and a limit is
+# what stops one pod OOM-ing the node.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: result-deployment
+spec:
+  template:
+    spec:
+      containers:
+        - name: result
+          resources:
+            requests:
+              cpu: 25m
+              memory: 128Mi
+            limits:
+              cpu: null
+              memory: 256Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker-deployment
+spec:
+  template:
+    spec:
+      containers:
+        - name: worker
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: null
+              memory: 128Mi
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: db-statefulset
+spec:
+  template:
+    spec:
+      containers:
+        - name: db
+          resources:
+            requests:
+              cpu: 50m
+              # Postgres stays generous — it wants page cache, and starving it
+              # trades a few MB for disk IO.
+              memory: 256Mi
+            limits:
+              cpu: null
+              memory: 512Mi
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis-statefulset
+spec:
+  template:
+    spec:
+      containers:
+        - name: redis
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: null
+              # MUST exceed --maxmemory (256mb) plus overhead. Set it lower and
+              # a full queue gets the pod OOMKilled instead of hitting Redis's
+              # own eviction policy.
+              memory: 512Mi

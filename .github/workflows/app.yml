@@ -1,0 +1,372 @@
+name: app
+
+# Application CI: check, build, scan, publish, then hand off to CD via a commit.
+#
+# This pipeline NEVER runs kubectl. Its last act is writing an image digest into
+# a kustomize overlay. Argo CD notices that commit and reconciles the cluster.
+# See docs/CICD.md §1.
+on:
+  pull_request:
+    paths: ['vote/**', 'result/**', 'worker/**', 'kubernetes/**', '.github/workflows/app.yml']
+  push:
+    branches: [main]
+    # GitHub rejects a workflow that uses both `paths` and `paths-ignore` on the
+    # same event, so the exclusion is a negated pattern inside `paths`. Order
+    # matters: later patterns override earlier ones, so the '!' line must come
+    # after the 'kubernetes/**' it is carving out of.
+    #
+    # The exclusion exists because CI writes digests back into overlays/.
+    # Without it, that commit retriggers CI, which builds again, which commits
+    # again.
+    paths:
+      - 'vote/**'
+      - 'result/**'
+      - 'worker/**'
+      - 'kubernetes/**'
+      - '!kubernetes/overlays/**'
+      - '.github/workflows/app.yml'
+  # Manual rebuild — for a base-image CVE fix, or to republish after an ECR
+  # lifecycle policy has expired an image the cluster still references.
+  workflow_dispatch:
+    inputs:
+      services:
+        description: 'Services to rebuild'
+        required: true
+        type: choice
+        options: [all, vote, result, worker]
+        default: all
+
+concurrency:
+  group: app-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ===========================================================================
+  # Which services actually changed? Building all three on a one-line CSS
+  # change wastes minutes and buries the signal.
+  # ===========================================================================
+  changes:
+    name: detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      services: ${{ steps.f.outputs.changes }}     # JSON array, feeds the matrix
+      manifests: ${{ steps.f.outputs.manifests }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dorny/paths-filter@v3
+        id: paths
+        if: github.event_name != 'workflow_dispatch'
+        with:
+          filters: |
+            vote: ['vote/**']
+            result: ['result/**']
+            worker: ['worker/**']
+            manifests: ['kubernetes/**']
+
+      # A manual dispatch has no diff to filter on, so the choice comes from the
+      # input instead.
+      - name: Resolve service list
+        id: f
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            case "${{ inputs.services }}" in
+              all) echo 'changes=["vote","result","worker"]' >> "$GITHUB_OUTPUT" ;;
+              *)   echo 'changes=["${{ inputs.services }}"]'  >> "$GITHUB_OUTPUT" ;;
+            esac
+            echo 'manifests=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'changes=${{ steps.paths.outputs.changes }}'   >> "$GITHUB_OUTPUT"
+            echo 'manifests=${{ steps.paths.outputs.manifests }}' >> "$GITHUB_OUTPUT"
+          fi
+
+  # ===========================================================================
+  # Unit tests.
+  #
+  # These replace the syntax-and-dependency checks that used to live here. Those
+  # were honest about not being tests; these are real ones.
+  #
+  # Every suite runs with no network and no database. A test that needs a live
+  # Postgres is an integration test -- valuable, but it does not belong in the
+  # gate that has to pass on every pull request in seconds.
+  # ===========================================================================
+  test:
+    name: test ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    needs: [changes]
+    if: needs.changes.outputs.services != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJSON(needs.changes.outputs.services) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # ---------------------------------------------------------------- vote
+      - name: Set up Python
+        if: matrix.service == 'vote'
+        uses: actions/setup-python@v5
+        with:
+          # Must match the Dockerfile. On an older Python, pip silently
+          # resolves different dependency versions than the image gets.
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: vote/requirements-dev.txt
+
+      - name: vote — pytest
+        if: matrix.service == 'vote'
+        working-directory: vote
+        run: |
+          pip install -q -r requirements-dev.txt
+          python -m pytest -v
+
+      # -------------------------------------------------------------- result
+      - name: Set up Node
+        if: matrix.service == 'result'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: result — node:test
+        if: matrix.service == 'result'
+        working-directory: result
+        run: |
+          npm install --no-audit --no-fund
+          npm test
+
+      # -------------------------------------------------------------- worker
+      - name: Set up .NET
+        if: matrix.service == 'worker'
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0'
+
+      - name: worker — xunit
+        if: matrix.service == 'worker'
+        run: dotnet test worker/tests/Worker.Tests.csproj --nologo --verbosity normal
+
+  # ===========================================================================
+  # Every overlay must render. Catches a broken patch, a bad generator
+  # reference, or a resource removed from base but still patched — none of
+  # which `kubectl apply --dry-run` would tell you without a cluster.
+  # ===========================================================================
+  kustomize:
+    name: kustomize build
+    runs-on: ubuntu-latest
+    needs: [changes]
+    if: needs.changes.outputs.manifests == 'true' || github.event_name == 'push'
+    strategy:
+      matrix:
+        overlay: [dev, stage, prod]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-kubectl@v4
+        with: { version: 'v1.33.0' }
+      - name: build overlays/${{ matrix.overlay }}
+        run: |
+          kubectl kustomize kubernetes/overlays/${{ matrix.overlay }} > rendered.yaml
+          echo "rendered $(grep -c '^kind:' rendered.yaml) resources"
+      - name: Verify selectors were not mutated
+        # The kustomize label transformer must never write into
+        # spec.selector.matchLabels — that field is immutable, and an overlay
+        # that injects into it breaks every future apply. See DECISIONS D-2.
+        run: |
+          python3 - <<'PY'
+          import re, sys
+          txt = open('rendered.yaml').read()
+          bad = []
+          for doc in txt.split('\n---\n'):
+              if re.search(r'^kind: (Deployment|StatefulSet)', doc, re.M):
+                  m = re.search(r'^  selector:\n    matchLabels:\n((?:      \S+: .*\n)+)', doc, re.M)
+                  if m:
+                      keys = re.findall(r'^      (\S+):', m.group(1), re.M)
+                      extra = [k for k in keys if k not in
+                               ('app.kubernetes.io/name','app.kubernetes.io/part-of')]
+                      if extra:
+                          bad.append(extra)
+          if bad:
+              print("Selectors contain unexpected labels:", bad); sys.exit(1)
+          print("selectors clean")
+          PY
+
+  # ===========================================================================
+  # Build, scan, and (on main) publish.
+  # ===========================================================================
+  build:
+    name: build ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    needs: [changes, test]
+    if: needs.changes.outputs.services != '[]'
+    permissions:
+      contents: read
+      id-token: write            # OIDC to AWS for the ECR login
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJSON(needs.changes.outputs.services) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3       # enables cross-arch builds
+      - uses: docker/setup-buildx-action@v3
+
+      # ECR_ROLE_ARN, not AWS_ROLE_ARN. Two separate roles on purpose: this one
+      # can only push to three ECR repositories, while the Terraform pipeline's
+      # role can create infrastructure. Sharing one variable would mean setting
+      # it here also switches on the Terraform plan/apply jobs.
+      #
+      # Both variables are checked in the gate below. Gating on the registry
+      # alone let this step run with no role-to-assume, which fails as
+      # "Could not load credentials from any providers" -- an error that says
+      # nothing about the actual cause.
+      - name: Assume AWS role
+        if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && vars.ECR_REGISTRY != '' && vars.ECR_ROLE_ARN != ''
+        uses: aws-actions/configure-aws-credentials@v6.2.3
+        with:
+          role-to-assume: ${{ vars.ECR_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'ap-south-1' }}
+          role-session-name: gha-app-build
+
+      - name: Log in to ECR
+        if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && vars.ECR_REGISTRY != '' && vars.ECR_ROLE_ARN != ''
+        uses: aws-actions/amazon-ecr-login@v2.1.7
+
+      # ---------------------------------------------------------------- PR
+      # Single-arch so the image can be LOADED into the local daemon and
+      # scanned. buildx cannot --load a multi-platform image; there is no such
+      # thing as a multi-arch image in a single-arch daemon.
+      - name: Build for scanning (PR)
+        if: github.event_name == 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          context: ./${{ matrix.service }}
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: scan:${{ matrix.service }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+      - name: Scan image (PR)
+        if: github.event_name == 'pull_request'
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: scan:${{ matrix.service }}
+          format: table
+          severity: CRITICAL,HIGH
+          exit-code: '0'      # report first; tighten once the base images are current
+          ignore-unfixed: true
+
+      # -------------------------------------------------------------- main
+      # Multi-arch, because the EKS node group is x86_64 while local machines
+      # are arm64. A single-arch image fails at runtime with `exec format
+      # error`, and it fails on the NODE, not in CI.
+      - name: Build and push (main)
+        id: push
+        if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && vars.ECR_REGISTRY != '' && vars.ECR_ROLE_ARN != ''
+        uses: docker/build-push-action@v6
+        with:
+          context: ./${{ matrix.service }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: true         # SLSA attestation
+          sbom: true               # software bill of materials
+          # Tag identifies the BUILD, not just the commit. ECR repositories are
+          # IMMUTABLE, and a rebuild of the same source against a patched base
+          # image is a different artifact -- it must not reuse the tag.
+          tags: |
+            ${{ vars.ECR_REGISTRY }}/voteapp-${{ matrix.service }}:${{ github.sha }}-${{ github.run_number }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+      # The digest is the point. A tag can be repointed at different content;
+      # a digest cannot. This is what gets written into the overlay.
+      - name: Record digest
+        if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && vars.ECR_REGISTRY != '' && vars.ECR_ROLE_ARN != ''
+        run: |
+          mkdir -p digests
+          echo "${{ steps.push.outputs.digest }}" > digests/${{ matrix.service }}.txt
+          echo "${{ matrix.service }} -> ${{ steps.push.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload digest
+        if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && vars.ECR_REGISTRY != '' && vars.ECR_ROLE_ARN != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.service }}
+          path: digests/${{ matrix.service }}.txt
+          retention-days: 1
+
+  # ===========================================================================
+  # The handoff to CD.
+  #
+  # Writes the new digests into overlays/dev and commits. That commit IS the
+  # deployment — Argo CD reconciles from it. Nothing here touches a cluster.
+  #
+  # Only dev is updated automatically. Promotion to stage and prod is a pull
+  # request moving the same digest, reviewed by a human. See docs/CICD.md §5.
+  # ===========================================================================
+  update-dev-overlay:
+    name: update dev overlay
+    runs-on: ubuntu-latest
+    needs: [build, kustomize]
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' && vars.ECR_REGISTRY != '' && vars.ECR_ROLE_ARN != ''
+    permissions:
+      contents: write            # to push the digest commit
+    steps:
+      - uses: actions/checkout@v4
+        with: { token: '${{ secrets.GITHUB_TOKEN }}' }
+
+      - uses: actions/download-artifact@v4
+        with: { path: digests, pattern: 'digest-*', merge-multiple: true }
+
+      - name: Install kustomize
+        run: |
+          curl -sSL "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+          sudo mv kustomize /usr/local/bin/
+
+      - name: Pin images by digest
+        working-directory: kubernetes/overlays/dev
+        run: |
+          changed=0
+          for f in ../../../digests/*.txt; do
+            [ -e "$f" ] || continue
+            svc=$(basename "$f" .txt)
+            digest=$(cat "$f")
+            kustomize edit set image \
+              "programmer175/voteapp_${svc}=${{ vars.ECR_REGISTRY }}/voteapp-${svc}@${digest}"
+            echo "  ${svc} -> ${digest}"
+            changed=1
+          done
+          echo "CHANGED=$changed" >> "$GITHUB_ENV"
+
+      - name: Verify the overlay still renders
+        if: env.CHANGED == '1'
+        run: kubectl kustomize kubernetes/overlays/dev > /dev/null
+
+      - name: Commit
+        if: env.CHANGED == '1'
+        run: |
+          git config user.name  'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          if git diff --quiet; then
+            echo "no change to commit"; exit 0
+          fi
+          # [skip ci] belts-and-braces alongside the paths-ignore above.
+          git commit -am "dev: pin images to ${GITHUB_SHA:0:7} [skip ci]"
+
+          # Retry with rebase. Two merges landing close together both try to
+          # push here; the second is rejected as non-fast-forward. Without this
+          # the deploy silently does not happen and the cluster keeps running
+          # the older image while CI reports success.
+          for attempt in 1 2 3 4 5; do
+            if git push; then
+              echo "pushed on attempt $attempt"; exit 0
+            fi
+            echo "push rejected (attempt $attempt) — rebasing onto origin/main"
+            git pull --rebase --autostash origin main || exit 1
+            sleep $((attempt * 3))
+          done
+          echo "::error::could not push the digest commit after 5 attempts"
+          exit 1

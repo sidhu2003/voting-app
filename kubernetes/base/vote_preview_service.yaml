@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: vote-preview-service
+  labels:
+    app.kubernetes.io/name: vote
+    app.kubernetes.io/component: frontend
+    app.kubernetes.io/part-of: voting-app
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  # Reaches the GREEN version while a rollout is paused, so the new release can
+  # be exercised before any user sees it.
+  #
+  # The selector here is intentionally minimal. Argo Rollouts INJECTS
+  # `rollouts-pod-template-hash` into it at runtime to steer traffic between
+  # blue and green -- that is the mechanism the whole strategy rests on.
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: vote
+    app.kubernetes.io/part-of: voting-app
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+      protocol: TCP

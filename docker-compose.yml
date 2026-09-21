@@ -1,0 +1,123 @@
+# Local verification stack.
+#
+# Two differences from a plain "run the app" compose file, both deliberate:
+#
+#   1. It BUILDS from source rather than pulling prebuilt images, so it exercises
+#      the current working tree.
+#   2. Every configurable value is set to something OTHER than the code's default --
+#      service names matching the Kubernetes Services (db-service / redis-service),
+#      custom Postgres credentials, a password containing awkward characters, and a
+#      Redis password. If the app comes up and votes flow end to end, the environment
+#      variables are provably being read; the code cannot have silently fallen back
+#      to its built-in defaults, because those defaults point nowhere.
+#
+# Env vars are grouped to mirror how they are sourced in Kubernetes: plain
+# configuration would come from a ConfigMap, passwords from a Secret.
+#
+# Usage:
+#   docker compose up -d --build
+#   open http://localhost:4000   (vote)   and   http://localhost:80   (results)
+#   docker compose down -v       (-v also drops the Postgres volume)
+
+services:
+
+  vote:
+    container_name: vote
+    build:
+      context: ./vote
+    image: voteapp_vote:local
+    ports:
+      - "4000:4000"
+    environment:
+      # --- ConfigMap ---
+      REDIS_HOST: redis-service
+      REDIS_PORT: "6379"
+      REDIS_DB: "0"
+      OPTION_A: Cats
+      OPTION_B: Dogs
+      # --- Secret ---
+      REDIS_PASSWORD: "s3cr3t-redis-pw"
+    depends_on:
+      redis-service:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker:
+    container_name: worker
+    build:
+      context: ./worker
+    image: voteapp_worker:local
+    environment:
+      # --- ConfigMap ---
+      REDIS_HOST: redis-service
+      REDIS_PORT: "6379"
+      POSTGRES_HOST: db-service
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: voteuser
+      POSTGRES_DB: votesdb
+      # --- Secret ---
+      REDIS_PASSWORD: "s3cr3t-redis-pw"
+      POSTGRES_PASSWORD: "p@ss:word/1"
+    depends_on:
+      redis-service:
+        condition: service_healthy
+      db-service:
+        condition: service_healthy
+    # Gives the SIGTERM handler room to finish the vote it is holding before exit.
+    # Watch it work: docker compose stop worker && docker compose logs worker
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+  result:
+    container_name: result
+    build:
+      context: ./result
+    image: voteapp_result:local
+    ports:
+      - "80:80"
+    environment:
+      # --- ConfigMap ---
+      PORT: "80"
+      POSTGRES_HOST: db-service
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: voteuser
+      POSTGRES_DB: votesdb
+      # --- Secret ---
+      POSTGRES_PASSWORD: "p@ss:word/1"
+    depends_on:
+      db-service:
+        condition: service_healthy
+    restart: unless-stopped
+
+  redis-service:
+    container_name: redis
+    image: redis:alpine
+    command: ["redis-server", "--requirepass", "s3cr3t-redis-pw", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "s3cr3t-redis-pw", "--no-auth-warning", "PING"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  db-service:
+    container_name: db
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: voteuser
+      POSTGRES_PASSWORD: "p@ss:word/1"
+      POSTGRES_DB: votesdb
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U voteuser -d votesdb"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  db-data:
+  redis-data:

@@ -1,0 +1,70 @@
+# Real hostnames, TLS, and the AWS Load Balancer Controller instead of nginx.
+#
+# `annotations` merges by key, so the nginx annotations from the base survive
+# unless explicitly nulled. They are harmless on an ALB (ignored by a different
+# controller), but nulling them keeps the rendered manifest honest about what
+# is actually in effect.
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: vote-ingress
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: null
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    # One shared ALB for both Ingresses. Without group.name you get one ALB
+    # each, at roughly $16-22/month apiece.
+    alb.ingress.kubernetes.io/group.name: voting-app
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+spec:
+  ingressClassName: alb
+  rules:
+    - host: vote.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: vote-service
+                port:
+                  name: http
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: result-ingress
+  annotations:
+    # nginx-specific settings have no meaning on an ALB.
+    nginx.ingress.kubernetes.io/affinity: null
+    nginx.ingress.kubernetes.io/affinity-mode: null
+    nginx.ingress.kubernetes.io/session-cookie-name: null
+    nginx.ingress.kubernetes.io/session-cookie-max-age: null
+    nginx.ingress.kubernetes.io/session-cookie-path: null
+    nginx.ingress.kubernetes.io/proxy-read-timeout: null
+    nginx.ingress.kubernetes.io/proxy-send-timeout: null
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/group.name: voting-app
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+    # ALB stickiness, the equivalent of the nginx cookie affinity. Still needed
+    # for the Socket.IO long-polling handshake. ALBs handle WebSocket upgrades
+    # natively, so there is no timeout annotation.
+    alb.ingress.kubernetes.io/target-group-attributes: >-
+      stickiness.enabled=true,stickiness.type=lb_cookie,stickiness.lb_cookie.duration_seconds=86400
+spec:
+  ingressClassName: alb
+  rules:
+    - host: results.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: result-service
+                port:
+                  name: http

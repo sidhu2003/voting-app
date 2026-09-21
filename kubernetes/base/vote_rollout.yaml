@@ -1,0 +1,160 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: vote-deployment
+  labels:
+    app.kubernetes.io/name: vote
+    app.kubernetes.io/component: frontend
+    app.kubernetes.io/part-of: voting-app
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  replicas: 2
+
+  # --------------------------------------------------------------------------
+  # BLUE-GREEN
+  #
+  # A Rollout is a drop-in replacement for a Deployment: same selector, same pod
+  # template, same everything below. What it adds is `strategy`.
+  #
+  # On a new image the controller creates a SECOND ReplicaSet (green) at full
+  # size while the first (blue) keeps serving every request. Nothing reaches
+  # green except through the preview Service, so you can exercise it while users
+  # are still on blue.
+  #
+  # Promoting flips one Service selector. That is the whole cutover -- instant,
+  # and instantly reversible while blue is still running.
+  # --------------------------------------------------------------------------
+  strategy:
+    blueGreen:
+      # Where real users go. This is the existing Service, unchanged.
+      activeService: vote-service
+
+      # Where the new version is reachable before promotion.
+      previewService: vote-preview-service
+
+      # false = the rollout PAUSES after green is healthy and waits for a human.
+      # That pause is the point of blue-green; with true it promotes itself as
+      # soon as the pods pass their probes and you have bought nothing over a
+      # rolling update.
+      autoPromotionEnabled: false
+
+      # How long blue stays alive after promotion. This is your rollback window:
+      # while those pods exist, `kubectl argo rollouts undo` is instant. After
+      # they are gone, rolling back means starting a fresh deploy.
+      scaleDownDelaySeconds: 300
+
+      # Point the preview Service at the ACTIVE version when no rollout is in
+      # progress, so it is never a dead endpoint.
+      previewReplicaCount: 2
+
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vote
+      app.kubernetes.io/part-of: voting-app
+
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vote
+        app.kubernetes.io/component: frontend
+        app.kubernetes.io/part-of: voting-app
+        app.kubernetes.io/managed-by: kustomize
+
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        # Filters the ~350 Linux syscalls down to what normal apps use,
+        # blocking ~40-60 dangerous ones (keyctl, bpf, mount, pivot_root...).
+        # Docker applies this by default; Kubernetes does NOT, so without it
+        # these pods are less confined than the same image under `docker run`.
+        # Also required by the `restricted` Pod Security Standard.
+        seccompProfile:
+          type: RuntimeDefault
+
+      # Spread replicas across nodes so losing one node cannot take the whole
+      # tier. Right now both vote pods happen to be on different nodes; nothing
+      # enforces that, and "happens to work" is not availability.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: vote
+              app.kubernetes.io/part-of: voting-app
+          # Only compare against pods from the SAME ReplicaSet. Without this,
+          # during a rolling update the old pods still count toward the skew and
+          # can push new pods onto the wrong nodes.
+          matchLabelKeys:
+            - pod-template-hash
+
+        # On EKS, add this second constraint to spread across AZs as well —
+        # a whole-AZ outage is the realistic failure, not a single node.
+        # Left out here because a single-machine cluster has no zone labels.
+        # - maxSkew: 1
+        #   topologyKey: topology.kubernetes.io/zone
+        #   whenUnsatisfiable: ScheduleAnyway
+        #   labelSelector:
+        #     matchLabels:
+        #       app.kubernetes.io/name: vote
+        #       app.kubernetes.io/part-of: voting-app
+
+      containers:
+        - name: vote
+          image: programmer175/voteapp_vote:local
+          # :local is built on this machine and never pushed anywhere.
+          # IfNotPresent stops the kubelet trying to pull it from Docker Hub.
+          imagePullPolicy: IfNotPresent
+
+          ports:
+            - name: http
+              containerPort: 4000
+              protocol: TCP
+
+          # vote talks ONLY to Redis. It never touches Postgres.
+          envFrom:
+            - configMapRef:
+                name: voteapp-redis-config
+            - configMapRef:
+                name: voteapp-vote-config
+            - secretRef:
+                name: redis-secret
+
+          # gunicorn writes control-server state to $HOME/.gunicorn, and the
+          # image's home is /home/appuser on the read-only root filesystem.
+          # Point HOME at the writable /tmp emptyDir mounted below.
+          env:
+            - name: HOME
+              value: /tmp
+
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "1Gi"
+              cpu: "1"
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            capabilities:
+              drop:
+                - ALL
+
+          volumeMounts:
+            - name: empty-volume
+              mountPath: /tmp
+
+      volumes:
+        - name: empty-volume
+          emptyDir: {}

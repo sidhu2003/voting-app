@@ -1,0 +1,61 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# ---------------------------------------------------------------------------
+# PROD — correct by design. Never applied from a laptop.
+#
+# This overlay exists so the repository shows what production should look like.
+# In a real setup it is applied by CI from a protected branch, or reconciled by
+# Argo CD, never by a human running `kubectl apply -k`.
+# ---------------------------------------------------------------------------
+
+resources:
+  - ../../base
+
+namespace: voting-prod
+
+labels:
+  - includeSelectors: false
+    pairs:
+      app.kubernetes.io/instance: voting-prod
+      environment: prod
+
+patches:
+  - path: patches/scale.yaml
+  - path: patches/resources.yaml
+  - path: patches/ingress.yaml
+  # vote is a Rollout (a CRD), and kustomize has no schema for it. A strategic
+  # merge patch therefore REPLACES the containers list instead of merging by
+  # name -- silently producing a container with no image, no envFrom and no
+  # probes. JSON6902 addresses exact paths, so it cannot do that.
+  - target:
+      group: argoproj.io
+      version: v1alpha1
+      kind: Rollout
+      name: vote-deployment
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/cpu
+        value: 200m
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/memory
+        value: 256Mi
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/memory
+        value: 512Mi
+      - op: remove
+        path: /spec/template/spec/containers/0/resources/limits/cpu
+
+# Immutable, CI-produced tags — never `latest`, never `local`.
+#
+# Better still is a digest (`newName@sha256:...`), because a tag can be
+# repointed at different content while a digest cannot. That is the only way
+# "which code is in prod?" has a truthful answer. In practice CI writes this
+# block, or Argo CD Image Updater does.
+images:
+  - name: programmer175/voteapp_vote
+    newTag: "1.0.0"
+  - name: programmer175/voteapp_result
+    newTag: "1.0.0"
+  - name: programmer175/voteapp_worker
+    newTag: "1.0.0"

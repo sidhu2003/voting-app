@@ -1,0 +1,117 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis-statefulset
+  labels:
+    app.kubernetes.io/name: redis
+    app.kubernetes.io/component: queue
+    app.kubernetes.io/part-of: voting-app
+    app.kubernetes.io/managed-by: kustomize
+
+spec:
+  serviceName: redis-service
+  replicas: 1
+
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: redis
+      app.kubernetes.io/part-of: voting-app
+
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: redis
+        app.kubernetes.io/component: queue
+        app.kubernetes.io/part-of: voting-app
+        app.kubernetes.io/managed-by: kustomize
+
+    spec:
+      # The redis image runs as root by default. Every other workload here is
+      # hardened, so this one was the odd one out. 999 is the `redis` user
+      # inside the image.
+      securityContext:
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+
+      containers:
+        - name: redis
+          image: redis:7.0.11
+
+          # The password comes from the Secret as an env var, then $(VAR) is
+          # substituted into args by Kubernetes. This keeps the password out of
+          # the manifest while still passing it to --requirepass.
+          #
+          # --appendonly yes  : write every change to disk. Without it Redis only
+          #                     snapshots about once an hour, so an ungraceful pod
+          #                     kill loses queued votes. Matches docker-compose.
+          # --maxmemory       : without a limit, a backlog can grow until it OOMs
+          #                     the whole node.
+          args:
+            - redis-server
+            - --requirepass
+            - $(REDIS_PASSWORD)
+            - --appendonly
+            - "yes"
+            - --maxmemory
+            - 256mb
+            - --maxmemory-policy
+            - noeviction
+
+          ports:
+            - name: redis
+              containerPort: 6379
+              protocol: TCP
+
+          # The server needs ONLY the password. REDIS_HOST/PORT/DB are for the
+          # clients that connect to it — Redis itself never reads them.
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: redis-secret
+                  key: REDIS_PASSWORD
+
+          # Note: exec probes do NOT expand $(VAR). Going through `sh -c` lets
+          # the shell read $REDIS_PASSWORD from the container environment.
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - redis-cli -a "$REDIS_PASSWORD" --no-auth-warning ping | grep -q PONG
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "250m"
+            limits:
+              memory: "512Mi"
+              cpu: "1"
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+
+          volumeMounts:
+            - name: redis-data
+              mountPath: /data
+
+  volumeClaimTemplates:
+    - metadata:
+        name: redis-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: standard
+        resources:
+          requests:
+            storage: 1Gi

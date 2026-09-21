@@ -1,0 +1,195 @@
+name: terraform-drift
+
+# Detects infrastructure that no longer matches the code.
+#
+# Terraform only knows about drift when you ask it. Someone clicks in the
+# console, an operator mutates a resource, a service changes a default on
+# upgrade — and nothing tells you until an unrelated deploy shows a surprising
+# diff, usually at the worst possible moment.
+#
+# This is the Terraform equivalent of INCIDENT-001, where a live `kubectl patch`
+# left the cluster disagreeing with git and nothing noticed until users did.
+on:
+  schedule:
+    # 02:30 UTC daily = 08:00 IST, so a report is waiting at the start of the day.
+    - cron: '30 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: terraform-drift
+  cancel-in-progress: false     # never cancel a half-finished sweep
+
+env:
+  TF_IN_AUTOMATION: 'true'
+  TF_CLI_ARGS: '-no-color'
+
+jobs:
+  detect:
+    name: plan ${{ matrix.stack }}
+    runs-on: ubuntu-latest
+    if: vars.AWS_ROLE_ARN != ''
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false      # one broken stack must not hide the other five
+      matrix:
+        stack:
+          - live/dev/00-network
+          - live/dev/10-platform
+          - live/stage/00-network
+          - live/stage/10-platform
+          - live/prod/00-network
+          - live/prod/10-platform
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with: { terraform_version: '1.15.8', terraform_wrapper: false }
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'ap-south-1' }}
+          role-session-name: gha-drift
+
+      - name: init
+        working-directory: terraform/${{ matrix.stack }}
+        run: terraform init -input=false
+
+      # -detailed-exitcode is the whole mechanism:
+      #   0 = no changes  → no drift
+      #   1 = error       → the stack is broken, or never applied
+      #   2 = changes     → DRIFT
+      #
+      # -refresh-only asks "does reality match state?" rather than "what would
+      # my code change?". Without it, code merged but not yet applied would show
+      # up as drift, which it is not.
+      - name: refresh-only plan
+        id: drift
+        working-directory: terraform/${{ matrix.stack }}
+        continue-on-error: true
+        run: |
+          terraform plan -refresh-only -input=false -detailed-exitcode > drift.txt 2>&1
+          echo "exit=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Summarise
+        working-directory: terraform/${{ matrix.stack }}
+        run: |
+          case "${{ steps.drift.outputs.exit }}" in
+            0) STATUS="clean" ;;
+            2) STATUS="DRIFT" ;;
+            *) STATUS="ERROR" ;;
+          esac
+          echo "$STATUS" > status.txt
+          {
+            echo "### \`${{ matrix.stack }}\` — $STATUS"
+            if [ "$STATUS" != "clean" ]; then
+              echo '```'; tail -c 8000 drift.txt; echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload result
+        uses: actions/upload-artifact@v4
+        with:
+          name: drift-${{ strategy.job-index }}
+          path: |
+            terraform/${{ matrix.stack }}/drift.txt
+            terraform/${{ matrix.stack }}/status.txt
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # One issue for the whole sweep, opened when anything drifts and closed
+  # automatically when everything is clean again.
+  #
+  # One issue per stack would mean six issues on a bad day and nobody reading
+  # any of them.
+  # ---------------------------------------------------------------------------
+  report:
+    name: report
+    runs-on: ubuntu-latest
+    needs: [detect]
+    if: always() && vars.AWS_ROLE_ARN != ''
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: results, pattern: 'drift-*' }
+
+      - name: Open, update or close the drift issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs'), path = require('path');
+            const stacks = [
+              'live/dev/00-network','live/dev/10-platform',
+              'live/stage/00-network','live/stage/10-platform',
+              'live/prod/00-network','live/prod/10-platform'];
+
+            // Artifacts are indexed by matrix position, so map them back.
+            const rows = [], details = [];
+            let bad = 0;
+            const dirs = fs.existsSync('results') ? fs.readdirSync('results').sort() : [];
+            dirs.forEach((d, i) => {
+              const base = path.join('results', d, 'terraform', stacks[i] || '');
+              let status = 'UNKNOWN', body = '';
+              try { status = fs.readFileSync(path.join(base,'status.txt'),'utf8').trim(); } catch {}
+              try { body   = fs.readFileSync(path.join(base,'drift.txt'),'utf8'); } catch {}
+              const icon = status === 'clean' ? '✅' : status === 'DRIFT' ? '⚠️' : '❌';
+              rows.push(`| \`${stacks[i]}\` | ${icon} ${status} |`);
+              if (status !== 'clean') {
+                bad++;
+                details.push(`<details><summary>${stacks[i]}</summary>\n\n\`\`\`\n${body.slice(-6000)}\n\`\`\`\n</details>`);
+              }
+            });
+
+            const TITLE = 'Terraform drift detected';
+            const { data: open } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo,
+              state: 'open', labels: 'drift' });
+            const existing = open.find(i => i.title === TITLE);
+
+            if (bad === 0) {
+              if (existing) {
+                await github.rest.issues.createComment({
+                  issue_number: existing.number, owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  body: `All stacks clean as of ${context.sha.slice(0,7)}. Closing.` });
+                await github.rest.issues.update({
+                  issue_number: existing.number, owner: context.repo.owner,
+                  repo: context.repo.repo, state: 'closed' });
+              }
+              core.info('No drift.');
+              return;
+            }
+
+            const body = [
+              `**${bad} of ${stacks.length} stacks differ from their code.**`,
+              '',
+              '| Stack | Status |', '|---|---|', ...rows, '',
+              '---', '', ...details, '',
+              '### What to do',
+              '',
+              '1. Find out **what changed and who changed it** before reverting anything —',
+              '   the drift may be a fix someone applied during an incident.',
+              '2. Then either bring the code up to match reality, or re-apply to bring',
+              '   reality back to the code.',
+              '3. If this keeps happening, the real fix is removing human write access,',
+              '   not detecting it faster.',
+              '',
+              `_Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}_`
+            ].join('\n');
+
+            if (existing) {
+              await github.rest.issues.update({
+                issue_number: existing.number, owner: context.repo.owner,
+                repo: context.repo.repo, body });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner, repo: context.repo.repo,
+                title: TITLE, body, labels: ['drift','infrastructure'] });
+            }
+            core.setFailed(`${bad} stack(s) drifted`);

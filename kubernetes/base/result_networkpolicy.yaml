@@ -1,0 +1,39 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: result-netpol
+  labels:
+    app.kubernetes.io/name: result
+    app.kubernetes.io/component: dashboard
+    app.kubernetes.io/part-of: voting-app
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: result
+      app.kubernetes.io/part-of: voting-app
+  policyTypes:
+    - Ingress
+    - Egress
+
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 4000
+
+  egress:
+    # result reads from Postgres and nothing else. It never touches Redis —
+    # which is exactly why the dashboard stayed green during INCIDENT-001 while
+    # voting was completely broken.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: postgres
+              app.kubernetes.io/part-of: voting-app
+      ports:
+        - protocol: TCP
+          port: 5432

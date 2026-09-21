@@ -1,0 +1,58 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# ---------------------------------------------------------------------------
+# DEV — the environment that actually runs on the local cluster.
+#
+#   kubectl apply -k kubernetes/overlays/dev
+# ---------------------------------------------------------------------------
+
+resources:
+- ../../base
+
+# Sets metadata.namespace on every resource AND renames the Namespace object
+# itself, so one base produces three isolated environments.
+namespace: voting-dev
+
+labels:
+- pairs:
+    app.kubernetes.io/instance: voting-dev
+    environment: dev
+
+  # vote is a Rollout (a CRD), and kustomize has no schema for it. A strategic
+  # merge patch therefore REPLACES the containers list instead of merging by
+  # name -- silently producing a container with no image, no envFrom and no
+  # probes. JSON6902 addresses exact paths, so it cannot do that.
+patches:
+- path: patches/scale.yaml
+- path: patches/resources.yaml
+- path: patches/ingress.yaml
+- patch: |-
+    - op: replace
+      path: /spec/template/spec/containers/0/resources/requests/cpu
+      value: 50m
+    - op: replace
+      path: /spec/template/spec/containers/0/resources/requests/memory
+      value: 192Mi
+    - op: replace
+      path: /spec/template/spec/containers/0/resources/limits/memory
+      value: 384Mi
+    - op: remove
+      path: /spec/template/spec/containers/0/resources/limits/cpu
+  target:
+    group: argoproj.io
+    kind: Rollout
+    name: vote-deployment
+    version: v1alpha1
+
+# Locally built images that were never pushed anywhere.
+images:
+- digest: sha256:745c7398d4e49c7f49bcc20ce7c9504a19d17e20a23b92a35236fcd0443f6471
+  name: programmer175/voteapp_result
+  newName: 825979909451.dkr.ecr.ap-south-1.amazonaws.com/voteapp-result
+- digest: sha256:ba0fe0cbe8d4db574abe4ba17c81736e726fd46998f0fdcffec5bf2e00b97c5c
+  name: programmer175/voteapp_vote
+  newName: 825979909451.dkr.ecr.ap-south-1.amazonaws.com/voteapp-vote
+- digest: sha256:b8d2ef3bc761d58485595e6cefc30ea53392cc192e267df7052b1b23e26dc919
+  name: programmer175/voteapp_worker
+  newName: 825979909451.dkr.ecr.ap-south-1.amazonaws.com/voteapp-worker

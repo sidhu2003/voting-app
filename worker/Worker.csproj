@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- A .NET SDK project globs **/*.cs, so it would otherwise try to compile
+         the test files sitting in tests/, and fail, because this project has
+         no xunit reference. Excluding them also keeps test code out of the
+         published image. -->
+    <Compile Remove="tests/**" />
+    <None Remove="tests/**" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Lets the test project see `internal` members without making them
+         public. Standard .NET practice for testing helpers. -->
+    <InternalsVisibleTo Include="Worker.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="StackExchange.Redis" Version="2.2.4" />
+    <PackageReference Include="Npgsql" Version="4.1.9" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.1" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.venv/
+
+# Node
+node_modules/
+lcov.info
+coverage/
+
+# .NET
+[Bb]in/
+[Oo]bj/
+TestResults/
+
+# Local
+.DS_Store

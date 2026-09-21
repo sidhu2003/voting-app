@@ -1,0 +1,13 @@
+# Build output. Without this, `COPY . .` drags a locally-restored obj/ into the
+# image and overwrites the restore the build stage just did for the target
+# architecture, failing with:
+#   NETSDK1047: Assets file doesn't have a target for 'net8.0/linux-arm64'
+obj/
+bin/
+
+# Test project: not needed at runtime, and it references xunit which the
+# runtime image does not have.
+tests/
+
+.vs/
+*.user

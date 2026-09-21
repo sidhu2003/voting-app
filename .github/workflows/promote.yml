@@ -1,0 +1,210 @@
+name: promote
+
+# Move an already-built, already-running image from one environment to the next.
+#
+# THE CENTRAL IDEA: this workflow does not build anything. It reads the image
+# digests currently pinned in the SOURCE overlay and writes those same digests
+# into the TARGET overlay, then opens a pull request.
+#
+# Because the digest is copied rather than rebuilt, the bytes running in prod
+# are provably the identical bytes that were running in stage. A rebuild — even
+# from the same commit — can produce a different image: base images move, apt
+# mirrors change, timestamps differ. "It worked in stage" only means something
+# if it is the same artifact.
+#
+# The pull request is the promotion. Approving it is the deploy.
+on:
+  workflow_dispatch:
+    inputs:
+      from:
+        description: 'Promote FROM this environment'
+        required: true
+        type: choice
+        options: [dev, stage]
+        default: dev
+      to:
+        description: 'Promote TO this environment'
+        required: true
+        type: choice
+        options: [stage, prod]
+        default: stage
+
+permissions:
+  contents: read
+
+jobs:
+  promote:
+    name: ${{ inputs.from }} → ${{ inputs.to }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write        # create the branch
+      pull-requests: write   # open the PR
+    steps:
+      - uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------------
+      # Only ever promote forwards. dev → stage → prod.
+      #
+      # Promoting backwards would silently overwrite a newer environment with an
+      # older image, and it is an easy mistake to make from a dropdown.
+      # -----------------------------------------------------------------------
+      - name: Validate direction
+        run: |
+          declare -A RANK=( [dev]=0 [stage]=1 [prod]=2 )
+          FROM_R=${RANK[${{ inputs.from }}]}
+          TO_R=${RANK[${{ inputs.to }}]}
+          if [ "$TO_R" -le "$FROM_R" ]; then
+            echo "::error::Refusing ${{ inputs.from }} → ${{ inputs.to }}. Promotion is forward only."
+            exit 1
+          fi
+          if [ $((TO_R - FROM_R)) -gt 1 ]; then
+            echo "::warning::Skipping an environment (${{ inputs.from }} → ${{ inputs.to }}). Allowed, but stage exists for a reason."
+            echo "SKIPPED_STAGE=true" >> "$GITHUB_ENV"
+          fi
+
+      - name: Install kustomize
+        run: |
+          curl -sSL "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+          sudo mv kustomize /usr/local/bin/
+
+      # -----------------------------------------------------------------------
+      # Read what the source environment is ACTUALLY running.
+      #
+      # Not what ECR has, not what the latest build produced — what is pinned in
+      # the source overlay right now. That is the artifact that has been running
+      # and observed, and it is the only thing worth promoting.
+      # -----------------------------------------------------------------------
+      - name: Read source digests
+        id: read
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import yaml, sys, json, os
+          src = f"kubernetes/overlays/{os.environ['FROM_ENV']}/kustomization.yaml"
+          images = yaml.safe_load(open(src)).get('images', [])
+
+          if not images:
+              print("::error::no images block in " + src, file=sys.stderr); sys.exit(1)
+
+          promotable, rejected = [], []
+          for img in images:
+              # GUARD: refuse to promote a mutable tag.
+              #
+              # A tag can be repointed at different content, so promoting one
+              # promotes a NAME, not an artifact — you lose the guarantee this
+              # whole workflow exists to provide. dev currently pins `:local`
+              # images built on a laptop; those must never reach stage or prod.
+              if img.get('digest'):
+                  promotable.append(img)
+              else:
+                  rejected.append(f"{img['name']} (tag: {img.get('newTag','?')})")
+
+          if rejected:
+              print("::error::refusing to promote images referenced by tag rather than digest:", file=sys.stderr)
+              for r in rejected: print("  - " + r, file=sys.stderr)
+              print("::error::these must be built and pushed by CI first", file=sys.stderr)
+              sys.exit(1)
+
+          print("images=" + json.dumps(promotable))
+          print(f"count={len(promotable)}")
+          PY
+        env:
+          FROM_ENV: ${{ inputs.from }}
+
+      # -----------------------------------------------------------------------
+      # Write the same digests into the target. `kustomize edit` rather than a
+      # text substitution, so the file stays canonical and the change is a
+      # clean diff.
+      # -----------------------------------------------------------------------
+      - name: Pin the same digests in ${{ inputs.to }}
+        id: pin
+        run: |
+          cd "kubernetes/overlays/${{ inputs.to }}"
+          echo '${{ steps.read.outputs.images }}' | python3 -c "
+          import json, sys, subprocess
+          for i in json.load(sys.stdin):
+              ref = f\"{i['name']}={i['newName']}@{i['digest']}\"
+              subprocess.run(['kustomize','edit','set','image',ref], check=True)
+              print(f\"  {i['name']} -> {i['digest'][:26]}...\")
+          "
+
+      - name: Verify the target still renders
+        run: |
+          kubectl kustomize kubernetes/overlays/${{ inputs.to }} > /dev/null \
+            || { echo "::error::${{ inputs.to }} overlay does not build after promotion"; exit 1; }
+        shell: bash
+
+      - name: Anything to promote?
+        id: diff
+        run: |
+          if git diff --quiet; then
+            echo "::notice::${{ inputs.to }} already runs these exact digests. Nothing to do."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            git --no-pager diff --stat
+          fi
+
+      # -----------------------------------------------------------------------
+      # Open a PR rather than committing directly.
+      #
+      # The PR IS the promotion record: who asked, who approved, exactly which
+      # digests moved, and when. For prod, branch protection or CODEOWNERS turns
+      # that into a required second pair of eyes — which is the separation of
+      # duties an auditor asks about.
+      # -----------------------------------------------------------------------
+      - name: Open promotion PR
+        if: steps.diff.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH="promote/${{ inputs.from }}-to-${{ inputs.to }}-$(date +%Y%m%d-%H%M%S)"
+          git config user.name  'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git checkout -b "$BRANCH"
+          git commit -am "promote: ${{ inputs.from }} → ${{ inputs.to }}"
+          git push -u origin "$BRANCH"
+
+          {
+            echo "Promotes the exact image digests currently running in **${{ inputs.from }}** to **${{ inputs.to }}**."
+            echo
+            echo "No rebuild. These are the same bytes, already running and observed in \`${{ inputs.from }}\`."
+            echo
+            echo "### Digests"
+            echo '```'
+            git --no-pager diff HEAD~1 -- "kubernetes/overlays/${{ inputs.to }}" | grep -E '^\+' | grep -v '^+++' || true
+            echo '```'
+            echo
+            echo "### Before approving"
+            echo
+            echo "- [ ] \`${{ inputs.from }}\` has been healthy on these digests long enough to trust"
+            echo "- [ ] any required migrations have run"
+            echo "- [ ] someone is available to roll back"
+            if [ "${SKIPPED_STAGE:-}" = "true" ]; then
+              echo "- [ ] **stage was skipped** — confirm that is intentional"
+            fi
+            echo
+            echo "### Rollback"
+            echo
+            echo "Revert this PR. Argo CD reconciles back to the previous digests."
+            echo
+            echo "_Opened by @${{ github.actor }} from run [\`${{ github.run_id }}\`](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})._"
+          } > /tmp/body.md
+
+          LABELS="promotion,${{ inputs.to }}"
+          [ "${SKIPPED_STAGE:-}" = "true" ] && LABELS="$LABELS,skipped-stage"
+
+          gh pr create \
+            --title "promote: ${{ inputs.from }} → ${{ inputs.to }} (${{ steps.read.outputs.count }} images)" \
+            --body-file /tmp/body.md \
+            --base main \
+            --head "$BRANCH" \
+            --label "$LABELS"
+
+      - name: Summary
+        run: |
+          if [ "${{ steps.diff.outputs.changed }}" = "true" ]; then
+            echo "### Promotion PR opened: ${{ inputs.from }} → ${{ inputs.to }}" >> "$GITHUB_STEP_SUMMARY"
+            echo "${{ steps.read.outputs.count }} image(s). Merge the PR to deploy." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### No change — ${{ inputs.to }} already runs these digests" >> "$GITHUB_STEP_SUMMARY"
+          fi

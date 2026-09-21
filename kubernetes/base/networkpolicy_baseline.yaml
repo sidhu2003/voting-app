@@ -1,0 +1,58 @@
+# Baseline policies. These two must exist before any of the per-component ones
+# make sense: the first denies everything, the rest of the files open the four
+# real edges back up.
+#
+# NOTE: NetworkPolicy is a SPEC, not an implementation. The API server accepts
+# these objects on any cluster, but only an enforcing CNI (Calico, Cilium,
+# kindnet on recent versions) actually applies them. On a non-enforcing CNI
+# `kubectl get netpol` looks perfect and all traffic still flows — a false sense
+# of security. Verify by applying a deny-all and checking something breaks.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  labels:
+    app.kubernetes.io/part-of: voting-app
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  # Empty podSelector = every pod in the namespace.
+  podSelector: {}
+  # Naming both types is what makes this a deny. A NetworkPolicy has no "deny"
+  # verb — selecting a pod for a policyType with no matching allow rule is how
+  # you deny. Omit Egress here and outbound traffic stays wide open.
+  policyTypes:
+    - Ingress
+    - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  labels:
+    app.kubernetes.io/part-of: voting-app
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  # THE rule people forget. With egress denied, pods cannot reach CoreDNS, so
+  # every hostname lookup fails and it presents as an application error rather
+  # than a network policy problem. Applies to all pods; harmless for redis and
+  # postgres, which resolve nothing.
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        # Both protocols. UDP carries almost all lookups; TCP is used when a
+        # response exceeds 512 bytes, and omitting it causes rare, baffling
+        # intermittent failures.
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

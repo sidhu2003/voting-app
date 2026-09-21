@@ -1,0 +1,33 @@
+# Strategic merge patch: replica counts and autoscaling bounds for dev.
+#
+# worker is 1 here purely to keep the local cluster small. Its PDB uses
+# maxUnavailable so a single replica still permits node drains.
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: vote-deployment
+spec:
+  replicas: 2
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: result-deployment
+spec:
+  replicas: 2
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker-deployment
+spec:
+  replicas: 2
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: vote-hpa
+spec:
+  minReplicas: 2
+  maxReplicas: 6

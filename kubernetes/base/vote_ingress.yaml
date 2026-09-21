@@ -1,0 +1,47 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: vote-ingress
+  labels:
+    app.kubernetes.io/name: vote
+    app.kubernetes.io/component: frontend
+    app.kubernetes.io/part-of: voting-app
+    app.kubernetes.io/managed-by: kustomize
+  annotations:
+    # No session affinity on purpose. vote is genuinely stateless — voter
+    # identity lives in a browser cookie, so any replica can serve any request.
+    # Pinning traffic would only make load balancing worse.
+    #
+    # --- On EKS, replace this block with: ---
+    # alb.ingress.kubernetes.io/scheme: internet-facing
+    # alb.ingress.kubernetes.io/target-type: ip
+    # alb.ingress.kubernetes.io/group.name: voting-app
+    #   ^ group.name is the cost control: without it you get one ALB per
+    #     Ingress at ~$16-22/month each. With it, both Ingresses share one.
+    nginx.ingress.kubernetes.io/proxy-body-size: 1m
+spec:
+  # This, not the deprecated kubernetes.io/ingress.class annotation.
+  # On EKS this becomes "alb".
+  ingressClassName: nginx
+
+  # TLS, once cert-manager is issuing certificates:
+  # tls:
+  #   - hosts: [vote.local]
+  #     secretName: vote-tls
+
+  rules:
+    # Host-based, not path-based. The apps serve assets from root-absolute
+    # paths and Socket.IO hardcodes /socket.io/ at the origin root, so a
+    # sub-path mount would require the apps to know their own prefix.
+    # Separate hostnames need no application changes at all.
+    - host: vote.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: vote-service
+                # Referenced by NAME, not number — survives a Service port change.
+                port:
+                  name: http

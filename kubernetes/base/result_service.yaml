@@ -1,0 +1,31 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: result-service
+  labels:
+    app.kubernetes.io/name: result
+    app.kubernetes.io/component: dashboard
+    app.kubernetes.io/part-of: voting-app
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  type: ClusterIP
+
+  # DELIBERATELY NO sessionAffinity: ClientIP.
+  #
+  # With an Ingress in front, this Service no longer sees browser IPs — it sees
+  # the ingress controller's pod IP. With one controller replica that is a
+  # single address, so ClientIP affinity would pin ALL traffic to one result
+  # pod and the second replica would sit idle.
+  #
+  # Stickiness belongs at the Ingress, where the cookie identifies the actual
+  # browser. See result_ingress.yaml.
+
+  selector:
+    app.kubernetes.io/name: result
+    app.kubernetes.io/part-of: voting-app
+
+  ports:
+    - name: http
+      port: 4000
+      targetPort: http
+      protocol: TCP

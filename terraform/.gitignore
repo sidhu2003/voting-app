@@ -1,0 +1,21 @@
+# Terraform state — must NEVER be committed. Contains secrets in plaintext.
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl.bak
+
+# Variable files that may hold real values
+*.auto.tfvars
+secrets.tfvars
+
+# Crash logs / plan output
+crash.log
+crash.*.log
+*.tfplan
+*.tfplan.json
+
+# Editor noise
+.DS_Store
+
+# NOTE: .terraform.lock.hcl SHOULD be committed. It pins provider hashes so CI and
+# your laptop resolve identical providers. It is a lockfile, not a cache.

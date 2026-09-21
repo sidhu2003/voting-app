@@ -1,0 +1,80 @@
+apiVersion: apps/v1 
+kind: Deployment
+metadata:
+  name: worker-deployment
+  labels:
+    app.kubernetes.io/name: worker
+    app.kubernetes.io/component: worker
+    app.kubernetes.io/part-of: voting-app
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: worker
+      app.kubernetes.io/part-of: voting-app
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: worker
+        app.kubernetes.io/component: worker
+        app.kubernetes.io/part-of: voting-app
+        app.kubernetes.io/managed-by: kustomize
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+
+      # A no-op at replicas: 1, but correct the moment you scale up — which you
+      # should, since LPOP makes workers competing consumers.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: worker
+              app.kubernetes.io/part-of: voting-app
+          matchLabelKeys:
+            - pod-template-hash
+
+      containers:
+      - name: worker
+        image: programmer175/voteapp_worker:local
+        # :local is built on this machine and never pushed anywhere.
+        # IfNotPresent stops the kubelet trying to pull it from Docker Hub.
+        imagePullPolicy: IfNotPresent
+        envFrom:
+          - configMapRef:
+              name: voteapp-redis-config
+          - secretRef:
+              name: redis-secret
+          - configMapRef:
+              name: voteapp-db-config
+          - secretRef:
+              name: db-secret
+
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "1"
+
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsUser: 10001
+          capabilities:
+            drop:
+              - ALL
+        
+        volumeMounts:
+          - name: empty-volume
+            mountPath: /tmp
+
+      volumes:
+        - name: empty-volume
+          emptyDir: {}

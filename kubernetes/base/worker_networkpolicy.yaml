@@ -1,0 +1,44 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: worker-netpol
+  labels:
+    app.kubernetes.io/name: worker
+    app.kubernetes.io/component: worker
+    app.kubernetes.io/part-of: voting-app
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: worker
+      app.kubernetes.io/part-of: voting-app
+  policyTypes:
+    - Ingress
+    - Egress
+
+  # NO ingress rules, deliberately.
+  #
+  # `Ingress` is still listed in policyTypes above, and that is the whole point:
+  # selecting the type with no rules denies ALL inbound. worker opens no server
+  # socket and nothing should ever connect to it. Omitting `Ingress` from
+  # policyTypes instead would leave it wide open.
+  ingress: []
+
+  egress:
+    # The only workload that needs both datastores.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: redis
+              app.kubernetes.io/part-of: voting-app
+      ports:
+        - protocol: TCP
+          port: 6379
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: postgres
+              app.kubernetes.io/part-of: voting-app
+      ports:
+        - protocol: TCP
+          port: 5432

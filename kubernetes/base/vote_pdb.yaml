@@ -1,0 +1,22 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: vote-pdb
+  labels:
+    app.kubernetes.io/name: vote
+    app.kubernetes.io/component: frontend
+    app.kubernetes.io/part-of: voting-app
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  # 2 replicas, so at least one must stay up. A node drain can take one vote
+  # pod but will WAIT for its replacement to become Ready before it is allowed
+  # to take the second. Without this, draining a node that happens to host both
+  # replicas takes the whole vote tier down at once.
+  minAvailable: 1
+
+  # Must match the pod labels, NOT the Deployment's. A PDB selects pods
+  # directly — it has no relationship to the workload that created them.
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vote
+      app.kubernetes.io/part-of: voting-app

@@ -1,0 +1,31 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: worker-pdb
+  labels:
+    app.kubernetes.io/name: worker
+    app.kubernetes.io/component: worker
+    app.kubernetes.io/part-of: voting-app
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  # maxUnavailable, NOT minAvailable — and the reason matters.
+  #
+  # worker currently runs 1 replica. `minAvailable: 1` on a single-replica
+  # workload permits ZERO voluntary disruptions, so `kubectl drain` on its node
+  # blocks forever waiting for a budget that can never be satisfied. That is a
+  # genuinely common self-inflicted outage: the drain hangs, someone forces it,
+  # and the protection was worthless anyway.
+  #
+  # `maxUnavailable: 1` is correct at ANY replica count: one pod may go at a
+  # time. At 1 replica it honestly admits the tier goes down; at 2+ it behaves
+  # exactly like minAvailable: 1.
+  #
+  # Better end state: bump the Deployment to replicas: 2. LPOP is atomic, so
+  # multiple workers are competing consumers with no coordination needed — N
+  # workers is simply N× throughput. Then this PDB gives real protection.
+  maxUnavailable: 1
+
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: worker
+      app.kubernetes.io/part-of: voting-app

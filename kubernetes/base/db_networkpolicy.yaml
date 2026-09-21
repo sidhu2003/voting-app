@@ -1,0 +1,37 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: db-netpol
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: voting-app
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: postgres
+      app.kubernetes.io/part-of: voting-app
+  policyTypes:
+    - Ingress
+    - Egress
+
+  ingress:
+    # worker writes, result reads. Nothing else in the cluster has any business
+    # reaching the database — notably not `vote`, which is the tier exposed to
+    # the internet. That is the whole value of this file: if vote is ever
+    # compromised, it cannot reach the data.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: worker
+              app.kubernetes.io/part-of: voting-app
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: result
+              app.kubernetes.io/part-of: voting-app
+      ports:
+        - protocol: TCP
+          port: 5432
+
+  egress: []
